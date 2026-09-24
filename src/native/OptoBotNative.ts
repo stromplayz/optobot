@@ -231,7 +231,8 @@ export function getOptoBotNative(): OptoBotNativeShape {
 
 export function subscribeOptoEvents(callback: MockListener): () => void {
   if (real && Platform.OS === 'android') {
-    const emitter = new NativeEventEmitter(real as unknown as { OptoBot: unknown })
+    // NativeEventEmitter expects a NativeModule; cast through unknown.
+    const emitter = new NativeEventEmitter(real as any)
     const subs = [
       emitter.addListener('opto:loadProgress', (p) => callback('opto:loadProgress', p)),
       emitter.addListener('opto:token', (p) => callback('opto:token', p)),
