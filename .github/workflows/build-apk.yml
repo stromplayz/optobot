@@ -112,10 +112,12 @@ jobs:
           cat local.properties
 
       - name: Decode release keystore (if provided)
-        if: ${{ secrets.SIGN_KEYSTORE_BASE64 != '' }}
+        if: ${{ env.SIGN_KEYSTORE_BASE64 != '' }}
+        env:
+          SIGN_KEYSTORE_BASE64: ${{ secrets.SIGN_KEYSTORE_BASE64 }}
         working-directory: android/app
         run: |
-          echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 -d > release.keystore
+          echo "$SIGN_KEYSTORE_BASE64" | base64 -d > release.keystore
           echo "release.keystore decoded"
 
       - name: Build release APK
