@@ -12,17 +12,21 @@ name: Build OptoBot APK
 # (still runnable on devices via `adb install`).
 #
 # Threat model note:
-#   - We NEVER hardcode any model name, vendor string, or the per-build secret in
-#     this file. The build secret is generated fresh on every run via
+#   - We NEVER hardcode any model name, vendor string, or the per-build secret
+#     in this file. The build secret is generated fresh on every run via
 #     scripts/gen_key.py and lives only inside the runner's build sandbox.
 #   - OptoBuildSecret.kt is generated at workflow run-time, used for the build,
 #     and discarded. It is never committed to git.
 
 on:
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
   pull_request:
-    branches: [main, master]
+    branches:
+      - main
+      - master
   workflow_dispatch:
     inputs:
       model_size:
@@ -86,19 +90,15 @@ jobs:
       - name: Generate per-build OptoBuildSecret + salt
         run: |
           python3 scripts/gen_key.py --force
-          # Sanity check: ensure the secret file exists
           test -f android/app/src/main/java/com/optobot/native/OptoBuildSecret.kt
           grep -q "OptoBuildSecret" android/app/src/main/java/com/optobot/native/OptoBuildSecret.kt
-          echo "✓ OptoBuildSecret.kt generated locally (not committed)"
+          echo "OptoBuildSecret.kt generated locally (not committed)"
 
       - name: Download model + encrypt bundled assets
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # If HF_TOKEN is set, export it for the download script.
-          # If the LFM2 repo is public for anonymous access, HF_TOKEN is not required.
           bash scripts/build_assets.sh
-          # Verify the encrypted bundles exist
           test -f android/app/src/main/assets/opto_core.bin
           test -f android/app/src/main/assets/opto_meta.bin
           test -f android/app/src/main/assets/opto_key.hint
@@ -107,7 +107,6 @@ jobs:
       - name: Configure Gradle
         working-directory: android
         run: |
-          # Create local.properties pointing at the Android SDK installed above
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           echo "ndk.dir=$ANDROID_HOME/ndk/27.0.12075200" >> local.properties
           cat local.properties
@@ -117,7 +116,7 @@ jobs:
         working-directory: android/app
         run: |
           echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 -d > release.keystore
-          echo "✓ release.keystore decoded"
+          echo "release.keystore decoded"
 
       - name: Build release APK
         working-directory: android
@@ -133,7 +132,6 @@ jobs:
           APK=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
           echo "Found APK: $APK"
           BASENAME=$(basename "$APK")
-          # Rename with a short-sha tag for clarity in the artifact list
           cp "$APK" "OptoBot-${GITHUB_SHA::7}-${BASENAME}"
 
       - name: Compute APK checksum
@@ -157,7 +155,7 @@ jobs:
           rm -f android/app/src/main/assets/opto_*.bin
           rm -f android/app/src/main/assets/opto_key.hint
           rm -f android/app/release.keystore
-          echo "✓ cleaned sensitive intermediates"
+          echo "cleaned sensitive intermediates"
 
   notify:
     name: Summary
