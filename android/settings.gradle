@@ -1,0 +1,3 @@
+rootProject.name = 'OptoBot'
+apply from: '../node_modules/react-native/cli.gradle'
+include ':app'

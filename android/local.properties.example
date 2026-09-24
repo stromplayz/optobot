@@ -1,0 +1,4 @@
+// Sample local.properties — copy to local.properties and set real paths.
+// This file is NOT committed (gitignored).
+sdk.dir=/Users/youruser/Library/Android/sdk
+ndk.dir=/Users/youruser/Library/Android/sdk/ndk/27.0.12075200

@@ -1,0 +1,42 @@
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/key.properties
+android/app/release/
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# OptoBuildSecret — NEVER commit. Per-build, regenerated.
+android/app/src/main/java/com/optobot/native/OptoBuildSecret.kt
+
+# Encrypted model assets — large, rebuilt per release
+android/app/src/main/assets/_raw/
+android/app/src/main/assets/opto_core.bin
+android/app/src/main/assets/opto_meta.bin
+android/app/src/main/assets/opto_key.hint
+
+# Node
+node_modules/
+dist/
+.webpack-cache/
+.expo/
+.expo-shared/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

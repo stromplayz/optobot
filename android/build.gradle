@@ -1,0 +1,38 @@
+// Root build.gradle
+buildscript {
+    ext {
+        kotlinVersion = "1.9.24"
+        gradlePluginVersion = "8.5.0"
+        minSdkVersion = 26
+        compileSdkVersion = 34
+        targetSdkVersion = 34
+        ndkVersion = "27.0.12075200"
+        supportLibVersion = "1.13.1"
+        mediaCompatVersion = "1.7.0"
+        supportV4Version = "1.0.0"
+    }
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle:${gradlePluginVersion}")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:${kotlinVersion}")
+        classpath("com.facebook.react:react-native-gradle-plugin:0.75.4")
+    }
+}
+
+apply plugin: "com.facebook.react"
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url 'https://www.jitpack.io' }
+        mavenLocal()
+        // React Native prebuilts — maven from npm package
+        maven {
+            url "$rootDir/../node_modules/react-native/android"
+        }
+    }
+}

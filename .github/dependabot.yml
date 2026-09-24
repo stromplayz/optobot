@@ -1,0 +1,38 @@
+# Dependabot — keep Android + JS + GitHub Actions versions fresh.
+# We do NOT enable GH Actions updates for the model download URL because the
+# HuggingFace resolve endpoint is pinned to a revision tag.
+
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/optobot"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "npm"
+    groups:
+      react-native:
+        patterns:
+          - "react-native"
+          - "react"
+          - "@react-native/*"
+
+  - package-ecosystem: "gradle"
+    directory: "/optobot/android"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "gradle"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "github-actions"
