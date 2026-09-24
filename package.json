@@ -15,7 +15,7 @@
   "dependencies": {
     "react": "18.3.1",
     "react-native": "0.75.4",
-    "zustand": "^4.5.5",
+    "zustand": "^5.0.15",
     "@react-native-async-storage/async-storage": "^1.23.1"
   },
   "devDependencies": {
