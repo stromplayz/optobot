@@ -9,15 +9,18 @@
     "jsx": "react",
     "lib": ["es2022", "dom"],
     "target": "es2020",
-    "module": "commonjs",
+    "module": "es2022",
+    "moduleResolution": "bundler",
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"]
-    }
+    },
+    "types": []
   },
   "include": ["src/**/*", "index.js"],
   "exclude": ["node_modules", "android", "ios"]
 }
+
