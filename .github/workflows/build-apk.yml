@@ -81,7 +81,11 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: 'platform-tools platforms;android-34 build-tools;34.0.0 ndk;27.0.12075200'
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
+          # NDK is preinstalled on ubuntu-latest runners (~r27d). We don't
+          # pin a specific NDK version because the runner's preinstalled
+          # version is the most reliable. If you need a pinned NDK, override
+          # here and in android/local.properties.
 
       - name: Install npm dependencies
         run: |
@@ -107,8 +111,16 @@ jobs:
       - name: Configure Gradle
         working-directory: android
         run: |
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          echo "ndk.dir=$ANDROID_HOME/ndk/27.0.12075200" >> local.properties
+          # Locate the preinstalled NDK and write local.properties
+          SDK_DIR="$ANDROID_HOME"
+          NDK_DIR=$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | head -1)
+          if [ -z "$NDK_DIR" ]; then
+            echo "NDK not found in \$ANDROID_HOME/ndk — using SDK default"
+            echo "sdk.dir=$SDK_DIR" > local.properties
+          else
+            echo "sdk.dir=$SDK_DIR" > local.properties
+            echo "ndk.dir=$NDK_DIR" >> local.properties
+          fi
           cat local.properties
 
       - name: Decode release keystore (if provided)
