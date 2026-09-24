@@ -19,6 +19,11 @@ RAW="android/app/src/main/assets/_raw"
 
 echo "==> [1/5] downloading raw artifacts"
 python3 scripts/download_lfm2.py --out "$RAW"
+# Fail-fast: if the model or tokenizer is missing, we can't continue.
+if [ ! -f "$RAW/model.onnx" ] || [ ! -f "$RAW/tokenizer.json" ]; then
+  echo "FATAL: required model files not in $RAW — check HF_TOKEN / repo access"
+  exit 2
+fi
 
 echo "==> [2/5] generating build secret + salt"
 python3 scripts/gen_key.py --force
