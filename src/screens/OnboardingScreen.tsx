@@ -76,8 +76,16 @@ export function OnboardingScreen() {
     } as Partial<UserProfile>)
   }
 
-  function next() { if (step < 6) setStep(step + 1) else handleFinish() }
-  function back() { if (step > 0) setStep(step - 1) }
+  function next() {
+    if (step < 6) {
+      setStep(step + 1)
+    } else {
+      handleFinish()
+    }
+  }
+  function back() {
+    if (step > 0) setStep(step - 1)
+  }
 
   return (
     <SafeAreaView style={styles.safe}>
