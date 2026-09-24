@@ -29,23 +29,19 @@ jobs:
           python-version: '3.11'
 
       - name: Install npm deps
-        working-directory: optobot
         run: npm install --no-audit --no-fund --legacy-peer-deps
 
       - name: TypeScript type check
-        working-directory: optobot
         run: npx tsc --noEmit
 
       - name: Python syntax check
-        working-directory: optobot/scripts
+        working-directory: scripts
         run: |
           python3 -m py_compile download_lfm2.py gen_key.py encrypt_model.py build_tokenizer_meta.py
 
-      - name: Kotlin syntax check (no build — just compile the source files)
-        working-directory: optobot/android/app/src/main/java
+      - name: Kotlin syntax check (best-effort; full build will catch the rest)
+        working-directory: android/app/src/main/java
         run: |
-          # Best-effort: catch obvious syntax issues without a full Gradle build.
-          # If kotlinc isn't installed we skip; the APK build job will catch them.
           command -v kotlinc >/dev/null 2>&1 && \
             kotlinc -nowarn -no-stdlib -skip-metadata-version-check \
               com/optobot/native/*.kt com/optobot/*.kt 2>&1 | head -20 || \

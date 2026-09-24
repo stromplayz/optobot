@@ -5,7 +5,7 @@
 version: 2
 updates:
   - package-ecosystem: "npm"
-    directory: "/optobot"
+    directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
@@ -20,7 +20,7 @@ updates:
           - "@react-native/*"
 
   - package-ecosystem: "gradle"
-    directory: "/optobot/android"
+    directory: "/android"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5

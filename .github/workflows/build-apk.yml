@@ -9,7 +9,7 @@ name: Build OptoBot APK
 #   - SIGN_KEY_PASSWORD        (optional)
 #
 # If signing secrets are absent, the workflow produces an unsigned release APK
-# (still runnable on devices via `adb install` with `--bypass-low-target-sdk-block`).
+# (still runnable on devices via `adb install`).
 #
 # Threat model note:
 #   - We NEVER hardcode any model name, vendor string, or the per-build secret in
@@ -21,13 +21,8 @@ name: Build OptoBot APK
 on:
   push:
     branches: [main, master]
-    paths:
-      - 'optobot/**'
-      - '.github/workflows/build-apk.yml'
   pull_request:
     branches: [main, master]
-    paths:
-      - 'optobot/**'
   workflow_dispatch:
     inputs:
       model_size:
@@ -68,14 +63,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: optobot/package.json
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
       - name: Install Python build deps (cryptography for AES-256-GCM)
         run: |
@@ -88,21 +80,18 @@ jobs:
           packages: 'platform-tools platforms;android-34 build-tools;34.0.0 ndk;27.0.12075200'
 
       - name: Install npm dependencies
-        working-directory: optobot
         run: |
           npm install --no-audit --no-fund --legacy-peer-deps
 
       - name: Generate per-build OptoBuildSecret + salt
-        working-directory: optobot
         run: |
           python3 scripts/gen_key.py --force
-          # Sanity check: ensure the secret file exists and is gitignored
+          # Sanity check: ensure the secret file exists
           test -f android/app/src/main/java/com/optobot/native/OptoBuildSecret.kt
           grep -q "OptoBuildSecret" android/app/src/main/java/com/optobot/native/OptoBuildSecret.kt
           echo "✓ OptoBuildSecret.kt generated locally (not committed)"
 
       - name: Download model + encrypt bundled assets
-        working-directory: optobot
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -116,7 +105,7 @@ jobs:
           ls -lh android/app/src/main/assets/opto_*.bin android/app/src/main/assets/opto_key.hint
 
       - name: Configure Gradle
-        working-directory: optobot/android
+        working-directory: android
         run: |
           # Create local.properties pointing at the Android SDK installed above
           echo "sdk.dir=$ANDROID_HOME" > local.properties
@@ -125,43 +114,29 @@ jobs:
 
       - name: Decode release keystore (if provided)
         if: ${{ secrets.SIGN_KEYSTORE_BASE64 != '' }}
-        working-directory: optobot/android/app
+        working-directory: android/app
         run: |
           echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 -d > release.keystore
           echo "✓ release.keystore decoded"
 
       - name: Build release APK
-        working-directory: optobot/android
+        working-directory: android
         env:
           SIGN_KEY_ALIAS: ${{ secrets.SIGN_KEY_ALIAS }}
           SIGN_STORE_PASSWORD: ${{ secrets.SIGN_STORE_PASSWORD }}
           SIGN_KEY_PASSWORD: ${{ secrets.SIGN_KEY_PASSWORD }}
         run: |
-          if [ -n "$SIGN_KEY_ALIAS" ]; then
-            # Inject signing config into app/build.gradle via env-driven override
-            ./gradlew assembleRelease \
-              -PtrackSigning=true \
-              -PsignKeyAlias="$SIGN_KEY_ALIAS" \
-              -PsignStorePassword="$SIGN_STORE_PASSWORD" \
-              -PsignKeyPassword="$SIGN_KEY_PASSWORD"
-          else
-            echo "⚠ No signing secrets — building unsigned release APK"
-            ./gradlew assembleRelease
-          fi
+          ./gradlew assembleRelease
 
       - name: Locate built APK
-        id: apk
-        working-directory: optobot
         run: |
           APK=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
           echo "Found APK: $APK"
-          echo "apk_path=$APK" >> $GITHUB_OUTPUT
-          # Get a clean filename
           BASENAME=$(basename "$APK")
+          # Rename with a short-sha tag for clarity in the artifact list
           cp "$APK" "OptoBot-${GITHUB_SHA::7}-${BASENAME}"
 
       - name: Compute APK checksum
-        working-directory: optobot
         run: |
           sha256sum OptoBot-*.apk | tee OptoBot-checksums.txt
 
@@ -170,14 +145,13 @@ jobs:
         with:
           name: OptoBot-APK-${{ github.sha }}
           path: |
-            optobot/OptoBot-*.apk
-            optobot/OptoBot-checksums.txt
+            OptoBot-*.apk
+            OptoBot-checksums.txt
           retention-days: 30
           if-no-files-found: error
 
       - name: Cleanup sensitive files (defensive — runner is destroyed post-job)
         if: always()
-        working-directory: optobot
         run: |
           rm -f android/app/src/main/java/com/optobot/native/OptoBuildSecret.kt
           rm -f android/app/src/main/assets/opto_*.bin
