@@ -118,7 +118,13 @@ export function useOptoChat() {
       case 'web':
         return `The system message above contains the content of the web page I asked you to read. Please summarize it concisely and tell me what I should know about it.`
       case 'search':
-        return `The system message above contains web search results for my query. Please summarize the top findings and tell me which result is most likely to answer my question.`
+        return `The system message above contains multi-source web search results for my query (DuckDuckGo + Wikipedia + arXiv). Please synthesize the most useful findings across all sources, mention which source each fact came from, and tell me what to do next if these results are insufficient.`
+      case 'wiki':
+        return `The system message above is a Wikipedia article. Please give me a concise summary, then explain the key concepts the article covers in plain language.`
+      case 'arxiv':
+        return `The system message above lists arXiv research papers matching my query. Please summarize the top 2-3 papers — for each, tell me what problem they tackle, their main approach, and any notable results. If any paper seems particularly relevant to my query, recommend I read the full text via /web.`
+      case 'books':
+        return `The system message above lists books matching my query from Open Library. Please recommend the top 2-3, explaining why each might be relevant to my query.`
       case 'youtube':
         return `The system message above contains a YouTube video transcript. Please give me a concise summary of what the video covers, plus any key timestamps if you can infer them.`
       case 'rss':

@@ -42,11 +42,17 @@ export interface OptoBotNativeShape {
   /** Check whether tools are permitted (consent given). */
   toolsGranted(): Promise<boolean>
 
-  // ---- OptoReach: on-device port of agent-reach channels ----
+  // ---- OptoReach: on-device internet tools (all free, no API keys) ----
   /** Fetch any web page as Markdown (via Jina Reader, free, no API key). */
   reachWeb(url: string): Promise<ReachResult>
-  /** Web search via DuckDuckGo HTML (no API key). */
+  /** Multi-source web search (DuckDuckGo + Wikipedia + arXiv, all free). */
   reachSearch(query: string): Promise<ReachResult>
+  /** Wikipedia full article (REST API, free, no key). */
+  reachWiki(query: string): Promise<ReachResult>
+  /** arXiv research paper search (free, open access, no key). */
+  reachArxiv(query: string): Promise<ReachResult>
+  /** Open Library book search (free, no key). */
+  reachBooks(query: string): Promise<ReachResult>
   /** Fetch a YouTube video transcript (English). */
   reachYouTube(input: string): Promise<ReachResult>
   /** Fetch and summarize an RSS / Atom feed. */
@@ -150,6 +156,30 @@ function ensureMock(): OptoBotNativeShape {
         ok: true,
         content: `[MOCK GITHUB] Repo ${repoInput}.\n\nStars: 89,998 | Language: Python\nDescription: Give your AI agent eyes to see the entire internet.\n\n--- README ---\n\n(Agent-Reach README would appear here in production.)`,
         source: `mock-gh:${repoInput}`,
+      }
+    },
+    async reachWiki(query: string) {
+      await new Promise((r) => setTimeout(r, 600))
+      return {
+        ok: true,
+        content: `[MOCK WIKIPEDIA] Article for "${query}".\n\nWikipedia is a free online encyclopedia. The REST summary endpoint returns the first paragraph of an article, perfect for grounding definitions. On the device, this hits https://en.wikipedia.org/api/rest_v1/page/summary/<title>.`,
+        source: `mock-wiki:${query}`,
+      }
+    },
+    async reachArxiv(query: string) {
+      await new Promise((r) => setTimeout(r, 700))
+      return {
+        ok: true,
+        content: `[MOCK ARXIV] Research papers matching "${query}".\n\n- [Sample Paper Title](https://arxiv.org/abs/2401.00001)\n  Authors: J. Doe, A. Smith\n  Published: 2026-01-15\n  Summary: A sample arXiv paper abstract about ${query}...\n\n- [Another Paper](https://arxiv.org/abs/2401.00002)\n  Authors: ...`,
+        source: `mock-arxiv:${query}`,
+      }
+    },
+    async reachBooks(query: string) {
+      await new Promise((r) => setTimeout(r, 600))
+      return {
+        ok: true,
+        content: `[MOCK OPEN LIBRARY] Books matching "${query}".\n\n- [Sample Book Title](https://openlibrary.org/books/OL12345M)\n  Author: Author Name | Year: 2020\n  Subjects: Subject 1, Subject 2`,
+        source: `mock-books:${query}`,
       }
     },
   }

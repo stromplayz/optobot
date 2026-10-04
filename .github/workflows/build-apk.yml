@@ -104,13 +104,16 @@ jobs:
           grep -q "OptoBuildSecret" android/app/src/main/java/com/optobot/native/OptoBuildSecret.kt
           echo "OptoBuildSecret.kt generated locally (not committed)"
 
-      - name: Build & encrypt bundled model (or stub if no model is provided)
+      - name: Build & encrypt bundled model (HF download if no local model)
         env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_STUB: ${{ inputs.stub_mode }}
         run: |
           if [ "$FORCE_STUB" = "true" ]; then
             echo "Stub mode forced via workflow_dispatch input"
             rm -f _model_raw/model.onnx _model_raw/tokenizer.json
+            # Also disable HF download for stub mode
+            unset HF_TOKEN
           fi
           bash scripts/build_assets.sh
           ls -lh android/app/src/main/assets/opto_*.bin android/app/src/main/assets/opto_key.hint

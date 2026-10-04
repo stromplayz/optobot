@@ -6,35 +6,31 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * OptoReach — on-device port of the Agent-Reach channels.
+ * OptoReach — on-device internet tools for OptoBot.
  *
- * Inspiration: https://github.com/Panniantong/agent-reach
+ * Inspiration: https://github.com/Panniantong/agent-reach (HTTP channels)
+ * + https://github.com/codeaashu/claude-code (tool-system pattern).
  *
- * What we port:
- *  - Web (any URL via Jina Reader — free, no API key)
- *  - YouTube transcript fetch (via youtube_transcript_api-style endpoint)
- *  - RSS / Atom parser (pure Java XML parsing)
- *  - GitHub public repo reader (via api.github.com — no auth needed for public)
- *  - Web search (via DuckDuckGo HTML — no API key)
+ * All channels use only free, no-API-key, no-trial endpoints. Nothing leaves
+ * the phone except direct HTTP calls to the public services below.
  *
- * What we deliberately skip:
- *  - Twitter, Reddit, Instagram, XiaoHongShu, Facebook, LinkedIn — these need
- *    cookies / authenticated browser sessions and are not appropriate for an
- *    Android app. Users who want them can run agent-reach on their desktop and
- *    pipe results into OptoBot via the /paste command.
- *  - Bilibili, Boss — same reason.
+ * Channels:
+ *  - web    → Jina Reader (free, no key) for any URL as Markdown
+ *  - search → Multi-source: DuckDuckGo HTML + Wikipedia REST + arXiv API
+ *  - wiki   → Wikipedia REST API (free, no key, generous rate limit)
+ *  - arxiv  → arXiv API (free, open access research papers)
+ *  - books  → Open Library API (free, no key)
+ *  - yt     → YouTube transcript fetch (via public timedtext endpoint)
+ *  - rss    → RSS / Atom parser (pure Java XML parsing)
+ *  - gh     → GitHub public repo reader (api.github.com — no auth for public)
  *
  * Privacy:
- *  - All reach calls go through the user's phone network directly.
- *  - We do NOT proxy through any OptoBot server.
- *  - The model decides when to call these tools (via slash commands or
- *    tool-call markers in its output). The user always sees a "Fetching X"
- *    indicator before any URL is hit.
+ *  - All calls go through the user's phone network directly. No proxy.
+ *  - The user always sees a "fetching..." indicator before any URL is hit.
+ *  - Reach calls are opt-in — only when the user types a slash command.
  *
  * Concurrency:
  *  - All calls are synchronous and must be made off the main thread.
- *    OptoReachTool callers (the engine + JS bridge) are responsible for
- *    dispatching to a background thread.
  */
 object OptoReach {
 
@@ -64,18 +60,179 @@ object OptoReach {
         }
     }
 
-    /** Web search via DuckDuckGo HTML endpoint (no API key needed). */
+    /**
+     * Multi-source web search — the backbone of OptoReach.
+     *
+     * Aggregates results from:
+     *  - DuckDuckGo HTML (general web, no API key)
+     *  - Wikipedia REST (for encyclopedic / definitional queries)
+     *  - arXiv API (for research / academic queries)
+     *
+     * Each source runs in parallel via a thread per source. We wait for
+     * all to finish (or timeout) and merge the results. The user sees a
+     * single combined answer.
+     */
     fun search(query: String, maxResults: Int = 5): ReachResult {
+        val results = mutableListOf<Pair<String, String>>()  // (source, content)
+        val errors = mutableListOf<Pair<String, String>>()   // (source, error)
+
+        val sources = listOf(
+            "ddg" to {
+                runCatching { searchDdg(query, maxResults) }
+                    .onSuccess { results.add("DuckDuckGo" to it) }
+                    .onFailure { errors.add("DuckDuckGo" to (it.message ?: "unknown")) }
+            },
+            "wiki" to {
+                runCatching { searchWikipedia(query, maxResults = 2) }
+                    .onSuccess { results.add("Wikipedia" to it) }
+                    .onFailure { errors.add("Wikipedia" to (it.message ?: "unknown")) }
+            },
+            "arxiv" to {
+                runCatching { searchArxiv(query, maxResults = 3) }
+                    .onSuccess { results.add("arXiv" to it) }
+                    .onFailure { errors.add("arXiv" to (it.message ?: "unknown")) }
+            }
+        )
+
+        // Run all sources in parallel, wait for all to finish (max 12s)
+        val threads = sources.map { (name, block) ->
+            Thread(block, "opto-search-$name").apply { isDaemon = true; start() }
+        }
+        threads.forEach { it.join(12_000) }
+
+        if (results.isEmpty()) {
+            val errSummary = errors.joinToString("; ") { "${it.first}: ${it.second}" }
+            return ReachResult.Error("all search sources failed — $errSummary")
+        }
+
+        val combined = buildString {
+            append("Multi-source search: \"$query\"\n\n")
+            for ((source, content) in results) {
+                append("── $source ──\n")
+                append(content.trim())
+                append("\n\n")
+            }
+            if (errors.isNotEmpty()) {
+                append("── failed sources ──\n")
+                for ((source, err) in errors) {
+                    append("- $source: $err\n")
+                }
+            }
+        }
+        return ReachResult.Ok(combined, source = "multi-search:$query")
+    }
+
+    /** Single-source DuckDuckGo search. Used by search() internally + as a fallback. */
+    private fun searchDdg(query: String, maxResults: Int): String {
+        val q = URLEncoder.encode(query, "UTF-8")
+        val html = httpGetText("https://html.duckduckgo.com/html/?q=$q")
+        val results = parseDdgResults(html).take(maxResults).joinToString("\n\n") { r ->
+            "- [${r.title}](${r.url})\n  ${r.snippet}"
+        }
+        return results.ifBlank { "(no results)" }
+    }
+
+    /** Wikipedia REST search — returns summary cards. Free, no API key. */
+    private fun searchWikipedia(query: String, maxResults: Int = 2): String {
+        // The Wikipedia opensearch API returns up to N titles + snippets + URLs.
+        val q = URLEncoder.encode(query, "UTF-8")
+        val url = "https://en.wikipedia.org/w/api.php?action=query&list=search" +
+            "&srsearch=$q&srlimit=$maxResults&format=json&origin=*"
+        val json = httpGetJson(url, headers = mapOf("Accept" to "application/json"))
+            ?: return "(wikipedia: no response)"
+        val arr = json.optJSONObject("query")?.optJSONArray("search") ?: return "(wikipedia: no results)"
+        val sb = StringBuilder()
+        for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            val title = item.optString("title")
+            val snippet = stripHtml(item.optString("snippet"))
+            val pageId = item.optInt("pageid")
+            val link = "https://en.wikipedia.org/?curid=$pageId"
+            sb.append("- [$title]($link)\n  $snippet\n\n")
+        }
+        return sb.toString().ifBlank { "(wikipedia: no results)" }
+    }
+
+    /** arXiv search — returns research paper abstracts. Free, open access, no API key. */
+    private fun searchArxiv(query: String, maxResults: Int = 3): String {
+        val q = URLEncoder.encode(query, "UTF-8")
+        val url = "http://export.arxiv.org/api/query?search_query=all:$q&max_results=$maxResults"
+        val xml = httpGetText(url)
+        val entries = parseAtomEntries(xml).take(maxResults)
+        if (entries.isEmpty()) return "(arxiv: no results)"
+        val sb = StringBuilder()
+        for (e in entries) {
+            sb.append("- [${e.title}](${e.link})\n")
+            sb.append("  Authors: ${e.authors}\n")
+            sb.append("  Published: ${e.published}\n")
+            sb.append("  Summary: ${e.summary.take(300)}${if (e.summary.length > 300) "..." else ""}\n\n")
+        }
+        return sb.toString()
+    }
+
+    /** Wikipedia full article — uses the REST summary endpoint. Free, no key. */
+    fun wiki(query: String): ReachResult {
+        return try {
+            // Try as a page title first (case-sensitive, spaces → underscores)
+            val title = URLEncoder.encode(query.trim().replace(' ', '_'), "UTF-8")
+            val url = "https://en.wikipedia.org/api/rest_v1/page/summary/$title"
+            val json = httpGetJson(url, headers = mapOf("Accept" to "application/json"))
+                ?: return ReachResult.Error("wikipedia: no response")
+            val title2 = json.optString("title")
+            val extract = json.optString("extract")
+            if (extract.isBlank()) {
+                ReachResult.Error("wikipedia: no article found for \"$query\"")
+            } else {
+                val content = "Wikipedia: $title2\n\n$extract\n\nSource: https://en.wikipedia.org/wiki/${title}"
+                ReachResult.Ok(content, source = "wiki:$query")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "wiki($query) failed", t)
+            ReachResult.Error(t.message ?: "wikipedia fetch failed")
+        }
+    }
+
+    /** arXiv search as a standalone command. */
+    fun arxiv(query: String): ReachResult {
+        return try {
+            val content = searchArxiv(query, maxResults = 5)
+            ReachResult.Ok("arXiv search: \"$query\"\n\n$content", source = "arxiv:$query")
+        } catch (t: Throwable) {
+            Log.w(TAG, "arxiv($query) failed", t)
+            ReachResult.Error(t.message ?: "arxiv fetch failed")
+        }
+    }
+
+    /** Open Library book search. Free, no API key. */
+    fun books(query: String): ReachResult {
         return try {
             val q = URLEncoder.encode(query, "UTF-8")
-            val html = httpGetText("https://html.duckduckgo.com/html/?q=$q")
-            val results = parseDdgResults(html).take(maxResults).joinToString("\n\n") { r ->
-                "- [${r.title}](${r.url})\n  ${r.snippet}"
+            val url = "https://openlibrary.org/search.json?q=$q&limit=5"
+            val json = httpGetJson(url, headers = mapOf("Accept" to "application/json"))
+                ?: return ReachResult.Error("open library: no response")
+            val docs = json.optJSONArray("docs") ?: return ReachResult.Error("open library: no results")
+            val sb = StringBuilder("Open Library search: \"$query\"\n\n")
+            for (i in 0 until docs.length()) {
+                val d = docs.optJSONObject(i) ?: continue
+                val title = d.optString("title")
+                val authors = d.optJSONArray("author_name")?.let { arr ->
+                    (0 until arr.length()).joinToString(", ") { arr.optString(it) }
+                } ?: "(unknown)"
+                val year = d.optInt("first_publish_year", -1).let { if (it > 0) it.toString() else "?" }
+                val olid = d.optString("cover_edition_key", "")
+                val link = if (olid.isNotBlank()) "https://openlibrary.org/books/$olid" else "https://openlibrary.org"
+                sb.append("- [$title]($link)\n  Author: $authors | Year: $year\n")
+                val subjectArr = d.optJSONArray("subject")
+                if (subjectArr != null) {
+                    val subjects = (0 until minOf(subjectArr.length(), 3)).joinToString(", ") { subjectArr.optString(it) }
+                    sb.append("  Subjects: $subjects\n")
+                }
+                sb.append("\n")
             }
-            ReachResult.Ok("Search: \"$query\"\n\n$results", source = "ddg:$query")
+            ReachResult.Ok(sb.toString(), source = "books:$query")
         } catch (t: Throwable) {
-            Log.w(TAG, "search($query) failed", t)
-            ReachResult.Error(t.message ?: "search failed")
+            Log.w(TAG, "books($query) failed", t)
+            ReachResult.Error(t.message ?: "books fetch failed")
         }
     }
 
@@ -241,6 +398,50 @@ object OptoReach {
     }
 
     private data class RssItem(val title: String, val link: String, val snippet: String)
+
+    /** Parsed arXiv Atom entry — has more fields than a generic RSS item. */
+    private data class ArxivEntry(
+        val title: String,
+        val link: String,
+        val authors: String,
+        val published: String,
+        val summary: String,
+    )
+
+    /** Parse arXiv-style Atom entries (with <author>, <published>, <summary>). */
+    private fun parseAtomEntries(xml: String): List<ArxivEntry> {
+        val entries = ArrayList<ArxivEntry>()
+        val entryRegex = Regex("""<entry>(.*?)</entry>""", RegexOption.DOT_MATCHES_ALL)
+        for (m in entryRegex.findAll(xml)) {
+            val block = m.groupValues[1]
+            val title = stripXml(extractTag(block, "title")).trim()
+            // arXiv Atom entries have <id>https://arxiv.org/abs/...</id> as the link
+            val link = extractTag(block, "id").trim().ifBlank {
+                Regex("""<link[^>]*href="([^"]+)"""").find(block)?.groupValues?.get(1) ?: ""
+            }
+            // Multiple <author><name>...</name></author> blocks
+            val authorsRegex = Regex("""<author>.*?<name>(.*?)</name>.*?</author>""", RegexOption.DOT_MATCHES_ALL)
+            val authors = authorsRegex.findAll(block).joinToString(", ") { it.groupValues[1].trim() }
+            val published = extractTag(block, "published").trim().take(10)  // YYYY-MM-DD
+            val summary = stripXml(extractTag(block, "summary")).trim()
+            if (title.isNotBlank()) {
+                entries.add(ArxivEntry(title, link, authors, published, summary))
+            }
+        }
+        return entries
+    }
+
+    /** Strip XML tags + decode common entities (parallel to stripHtml but for XML content). */
+    private fun stripXml(s: String): String {
+        return s.replace(Regex("""<[^>]+>"""), "")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&apos;", "'")
+            .trim()
+    }
 
     private fun parseRssOrAtom(xml: String): List<RssItem> {
         // Best-effort regex parsing — keeps us XML-parser-impl-agnostic.

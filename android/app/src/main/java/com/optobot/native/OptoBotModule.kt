@@ -231,6 +231,30 @@ class OptoBotModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun reachWiki(query: String, promise: Promise) {
+        Thread {
+            try { resolveReach(OptoReach.wiki(query), promise) }
+            catch (t: Throwable) { promise.reject("OPTO_REACH_FAIL", t.message, t) }
+        }.start()
+    }
+
+    @ReactMethod
+    fun reachArxiv(query: String, promise: Promise) {
+        Thread {
+            try { resolveReach(OptoReach.arxiv(query), promise) }
+            catch (t: Throwable) { promise.reject("OPTO_REACH_FAIL", t.message, t) }
+        }.start()
+    }
+
+    @ReactMethod
+    fun reachBooks(query: String, promise: Promise) {
+        Thread {
+            try { resolveReach(OptoReach.books(query), promise) }
+            catch (t: Throwable) { promise.reject("OPTO_REACH_FAIL", t.message, t) }
+        }.start()
+    }
+
+    @ReactMethod
     fun addListener(eventName: String) { /* no-op, required for emit subscription */ }
 
     @ReactMethod

@@ -140,10 +140,14 @@ optobot/
 
 - Node 18+, JDK 17, Android SDK + NDK (any version ≥ 27)
 - Python 3.10+ with `pip install cryptography`
-- An Android device or emulator with 4 GB+ RAM (arm64 or x86_64)
-- **Your own ONNX model** — we do NOT download from HuggingFace or any other
-  model hub. Bring your own `model.onnx` + `tokenizer.json` and drop them
-  into `_model_raw/` (gitignored). See "Bring your own model" below.
+- An Android device or emulator with 1 GB+ RAM (arm64 or x86_64)
+- **A model source** — pick one:
+  - **Easiest**: set `HF_TOKEN` env var and CI auto-downloads LFM2.5-230M Q4
+    from HuggingFace (~202 MB encrypted bundle). This is what we recommend.
+  - **Bring your own**: drop your own `model.onnx` + `tokenizer.json` into
+    `_model_raw/` (gitignored) and CI uses that instead.
+  - **Stub**: if neither is available, CI produces a 1-byte stub bundle so
+    you can still preview the UI (no real inference).
 
 ### Install
 
@@ -151,27 +155,28 @@ optobot/
 cd optobot
 yarn install         # or npm install
 
-# Drop your own ONNX model + tokenizer into _model_raw/ first.
-# Either copy them manually, or use the helper:
+# Option A (easiest): set HF_TOKEN and let CI / build_assets.sh download for you
+export HF_TOKEN=hf_xxx
+bash scripts/build_assets.sh
+# This downloads LFM2.5-230M Q4 (~202 MB) from HuggingFace, then encrypts.
+
+# Option B (bring your own model):
 python3 scripts/import_local_model.py \
     --model /path/to/your/model.onnx \
     --tokenizer /path/to/your/tokenizer.json
-
-# Generate the per-build secret + salt (one-time per release build)
-python3 scripts/gen_key.py --force
-
-# Encrypt your model + tokenizer and bundle into assets/
 bash scripts/build_assets.sh
-```
+# This uses your local model in _model_raw/ instead of downloading.
 
-If `_model_raw/` is empty, `build_assets.sh` produces a **stub bundle**
-so you can preview the UI without a real model — the chat UI works, slash
-commands work, but the AI responses are mock placeholder text.
+# Option C (no model, just preview UI):
+bash scripts/build_assets.sh
+# With no _model_raw/ and no HF_TOKEN, this writes a 1-byte stub bundle so
+# the chat UI still works (but the AI won't generate real responses).
+```
 
 After `build_assets.sh` completes, you should see:
 
 ```
-android/app/src/main/assets/opto_core.bin   ~700 MB (encrypted ONNX)
+android/app/src/main/assets/opto_core.bin   ~202 MB (encrypted LFM2.5-230M Q4)
 android/app/src/main/assets/opto_meta.bin   ~200 KB (encrypted tokenizer)
 android/app/src/main/assets/opto_key.hint    44 B  (base64 salt)
 ```
@@ -195,18 +200,40 @@ cd android && ./gradlew assembleRelease
 
 ---
 
-## Memory budget (4 GB-RAM device, LFM2-1.2B Q4)
+## Memory budget (2 GB-RAM device, LFM2.5-230M Q4)
 
 | Region                              | Size    | Notes                                |
 |-------------------------------------|---------|--------------------------------------|
-| ONNX file (encrypted, on disk)      | ~700 MB | Never loaded fully into RAM          |
-| Decrypted tmpfile (on disk)         | ~700 MB | ORT mmaps it                         |
-| RAM during generation (peak)        | ~250 MB | Working set: current shard + KV cache|
+| ONNX file (encrypted, on disk)      | ~202 MB | Never loaded fully into RAM          |
+| Decrypted tmpfile (on disk)         | ~202 MB | ORT mmaps it                         |
+| RAM during generation (peak)        | ~120 MB | Working set: current shard + KV cache|
 | App process baseline (UI + RN)      | ~120 MB | React Native + UI + store            |
-| Total peak RSS                      | ~380 MB | Comfortable on 4 GB devices          |
+| Total peak RSS                      | ~240 MB | Comfortable on 2 GB devices          |
+
+The 230M Q4 model is small enough to run on entry-level Android phones.
+Quality is lower than a 1B-class model — but OptoReach compensates: when
+the model doesn't know something, it tells the user to run `/search`,
+`/web`, or another slash command. The fetched content gets injected as
+a system message, and the model summarizes it.
 
 If the device signals `onTrimMemory(MODERATE)`, we close the ORT session
-and delete the decrypted tmpfile. Next chat re-opens in ~1 s.
+and delete the decrypted tmpfile. Next chat re-opens in <1 s.
+
+### Why a small model + agent-reach is a winning combo
+
+A 230M model can't memorize everything, but it can read and summarize
+well. By pairing it with OptoReach, the model becomes a *reasoning
+engine* over fresh web content rather than a stale knowledge snapshot:
+
+1. User asks a question the model can't answer from its weights.
+2. Model says: "I don't have current data on that — try `/search <query>`."
+3. User runs the slash command. OptoReach fetches results on-device.
+4. Results get injected as a `· context ·` system card.
+5. Model reads the context and produces a grounded answer.
+
+The model stays small (~200 MB), the user keeps full privacy (no proxy
+server), and the answers can reference today's news, latest library
+versions, recent research papers — anything the phone can fetch.
 
 ---
 
@@ -305,18 +332,23 @@ This repo ships two workflows under `.github/workflows/`:
 
 | Secret name              | Required? | Purpose                                             |
 |--------------------------|-----------|-----------------------------------------------------|
+| `HF_TOKEN`               | Optional  | HuggingFace token — if set, CI auto-downloads LFM2.5-230M Q4 |
 | `SIGN_KEYSTORE_BASE64`   | Optional  | Base64 of your release `.jks` for signed APK        |
 | `SIGN_KEY_ALIAS`         | Optional  | Keystore alias for the signing key                  |
 | `SIGN_STORE_PASSWORD`    | Optional  | Keystore password                                   |
 | `SIGN_KEY_PASSWORD`     | Optional  | Key password                                         |
 
-**No `HF_TOKEN` needed.** We don't download anything. You bring your own
-ONNX model — drop it into `_model_raw/` and push to `main` to trigger a
-real APK build.
+**Three modes:**
+1. **`HF_TOKEN` set, `_model_raw/` empty** — CI downloads LFM2.5-230M Q4
+   (~202 MB) from HuggingFace, encrypts, and uploads the bundle as an
+   artifact. This is the recommended path.
+2. **`HF_TOKEN` not set, `_model_raw/` populated** — CI uses your local
+   model. You bring your own ONNX + tokenizer.
+3. **Neither** — CI produces a 1-byte stub bundle so the UI can be
+   previewed but the AI won't generate real responses.
 
-If `_model_raw/` is empty, the workflow produces a **stub APK** so the UI
-can still be previewed. To force a stub build on demand, run the workflow
-with the `stub_mode` checkbox ticked.
+To force a stub build on demand, run the workflow with the `stub_mode`
+checkbox ticked (this disables HF download for that run).
 
 If signing secrets are absent, the workflow produces an **unsigned release
 APK**. You can still install it with `adb install` during development.

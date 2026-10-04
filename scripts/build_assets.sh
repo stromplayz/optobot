@@ -1,31 +1,47 @@
 #!/usr/bin/env bash
-# build_assets.sh — encrypt + bundle the model from _model_raw/ into the APK assets.
+# build_assets.sh — encrypt + bundle the model into the APK assets.
 #
-# We NEVER download from HuggingFace or any other model hub. The user must
-# drop their own ONNX model + tokenizer into _model_raw/ before running this.
+# Resolution order:
+#   1. If _model_raw/model.onnx + tokenizer.json exist → use the local files.
+#   2. Else if HF_TOKEN is set → download LFM2.5-230M Q4 from HuggingFace.
+#   3. Else → produce a stub bundle (UI preview only, no real inference).
 #
-# Required files in _model_raw/:
-#   - model.onnx              (the ONNX weights)
-#   - tokenizer.json          (HuggingFace tokenizer format)
-# Optional:
-#   - model.onnx.data         (external weights shard, if the ONNX file references one)
+# We prefer the user's local model. HF download is a convenience fallback.
 #
 # Run from project root:
 #   bash scripts/build_assets.sh
+# Or with HF download:
+#   HF_TOKEN=hf_xxx bash scripts/build_assets.sh
 
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 RAW="_model_raw"
+STAGED="android/app/src/main/assets/_raw"
 
 # ───────────────────────────────────────────────────────────────────────
-# Stub mode: no model provided → build a tiny mock bundle so the UI can
-# still be previewed. The Kotlin engine will fall back to a mock streamer
-# when opto_core.bin is missing or smaller than 1 KB.
+# Step 1: Acquire model files. Either copy from _model_raw/, download
+# from HuggingFace, or fall back to stub mode.
 # ───────────────────────────────────────────────────────────────────────
-if [ ! -f "$RAW/model.onnx" ] || [ ! -f "$RAW/tokenizer.json" ]; then
-  echo "==> [stub] no model in $RAW/ — building stub bundle for UI preview"
+
+if [ -f "$RAW/model.onnx" ] && [ -f "$RAW/tokenizer.json" ]; then
+  echo "==> [1/4] using local model from $RAW/"
+  ls -lh "$RAW/"
+  mkdir -p "$STAGED"
+  cp "$RAW/model.onnx" "$STAGED/model.onnx"
+  [ -f "$RAW/model.onnx.data" ] && cp "$RAW/model.onnx.data" "$STAGED/model.onnx.data" || true
+  cp "$RAW/tokenizer.json" "$STAGED/tokenizer.json"
+elif [ -n "$HF_TOKEN" ]; then
+  echo "==> [1/4] downloading model from HuggingFace (LFM2.5-230M Q4, ~202MB)"
+  mkdir -p "$STAGED"
+  python3 scripts/download_lfm2.py --out "$STAGED"
+  # Verify essential files exist
+  test -f "$STAGED/model.onnx" || { echo "FATAL: model.onnx missing after HF download"; exit 2; }
+  test -f "$STAGED/tokenizer.json" || { echo "FATAL: tokenizer.json missing after HF download"; exit 2; }
+  ls -lh "$STAGED/"
+else
+  echo "==> [stub] no local model in $RAW/ and no HF_TOKEN — building stub bundle"
   python3 scripts/gen_key.py --force
 
   # Write a stub encrypted file so OptoAssetDecryptor can still parse the
@@ -39,7 +55,6 @@ IV_LEN = 12
 PBKDF2_ITERS = 200_000
 KEY_LEN = 32
 
-# Read the per-build secret + salt
 with open("android/app/src/main/java/com/optobot/native/OptoBuildSecret.kt") as f:
     m = re.search(r'BUILD_SECRET\s*:\s*CharArray\s*=\s*"([^"]+)"', f.read())
     secret = m.group(1)
@@ -51,7 +66,6 @@ ct = AESGCM(key).encrypt(iv, b"OPTOBOT_STUB_MODEL_v1", None)
 with open("android/app/src/main/assets/opto_core.bin", "wb") as f:
     f.write(salt); f.write(iv); f.write(ct)
 
-# Stub tokenizer meta — just enough so OptoTokenizer.parseMeta() works
 meta = {
     "vocab": {"<unk>": 0, "<s>": 1, "</s>": 2, "<|im_start|>": 3, "<|im_end|>": 4},
     "merges": [],
@@ -69,24 +83,15 @@ with open("android/app/src/main/assets/opto_meta.bin", "wb") as f:
 EOF
   echo "OK stub bundle written (UI preview only - no real inference)"
   echo ""
-  echo "To build a real APK with your own model:"
-  echo "  1. Drop model.onnx + tokenizer.json into _model_raw/"
-  echo "  2. Re-run: bash scripts/build_assets.sh"
-  echo "  3. Re-run: cd android && ./gradlew assembleRelease"
+  echo "To build with a real model, either:"
+  echo "  1. Drop model.onnx + tokenizer.json into _model_raw/ and re-run, OR"
+  echo "  2. Set HF_TOKEN env var and re-run (downloads LFM2.5-230M Q4)"
   exit 0
 fi
 
-echo "==> [1/4] verifying local model in $RAW"
-test -f "$RAW/model.onnx" || { echo "FATAL: $RAW/model.onnx missing"; exit 2; }
-test -f "$RAW/tokenizer.json" || { echo "FATAL: $RAW/tokenizer.json missing"; exit 2; }
-ls -lh "$RAW/"
-
-# Stage into android/app/src/main/assets/_raw/ (the path encrypt_model.py expects)
-STAGED="android/app/src/main/assets/_raw"
-mkdir -p "$STAGED"
-cp "$RAW/model.onnx" "$STAGED/model.onnx"
-[ -f "$RAW/model.onnx.data" ] && cp "$RAW/model.onnx.data" "$STAGED/model.onnx.data" || true
-cp "$RAW/tokenizer.json" "$STAGED/tokenizer.json"
+# ───────────────────────────────────────────────────────────────────────
+# Step 2-4: Generate key, encrypt tokenizer, encrypt model
+# ───────────────────────────────────────────────────────────────────────
 
 echo "==> [2/4] generating build secret + salt"
 python3 scripts/gen_key.py --force
