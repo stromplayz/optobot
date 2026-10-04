@@ -41,7 +41,7 @@ jobs:
       - name: Python syntax check
         working-directory: scripts
         run: |
-          python3 -m py_compile download_lfm2.py gen_key.py encrypt_model.py build_tokenizer_meta.py
+          python3 -m py_compile import_local_model.py gen_key.py encrypt_model.py build_tokenizer_meta.py
 
       - name: Kotlin syntax check (best-effort; full build will catch the rest)
         working-directory: android/app/src/main/java
