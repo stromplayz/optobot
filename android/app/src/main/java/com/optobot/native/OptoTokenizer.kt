@@ -2,6 +2,7 @@ package com.optobot.native
 
 import android.content.Context
 import android.util.JsonReader
+import android.util.Log
 import java.io.StringReader
 
 /**

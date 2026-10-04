@@ -41,40 +41,27 @@ class OptoStreamer {
         val attentionMaskTensor = OnnxTensor.createTensor(env, arrayOf(attentionMask))
 
         // Build input map — use whatever names the model expects
-        val inputNames = session.inputNames
+        val inputNames = session.inputNames.toList()
         val inputs = HashMap<String, OnnxTensor>()
-        // First long input → input_ids, second → attention_mask
-        val longInputs = mutableListOf<Pair<String, OnnxTensor>>()
-        longInputs.add(inputNames.elementAtOrElse(0) { "input_ids" } to inputIdsTensor)
+        if (inputNames.isNotEmpty()) {
+            inputs[inputNames[0]] = inputIdsTensor
+        }
         if (inputNames.size > 1) {
-            longInputs.add(inputNames[1] to attentionMaskTensor)
-        }
-
-        for ((name, tensor) in longInputs) {
-            if (inputNames.contains(name)) {
-                inputs[name] = tensor
-            }
-        }
-
-        // Also add any other required inputs with default values
-        for (name in inputNames) {
-            if (!inputs.containsKey(name)) {
-                // Try to add as zeros with the same shape
-                // Skip for now — if the model needs other inputs, we'll handle them
-            }
+            inputs[inputNames[1]] = attentionMaskTensor
         }
 
         val output = session.run(inputs)
         try {
             // Find the logits output (usually "logits" or the first output)
             val outputName = session.outputNames.firstOrNull() ?: "logits"
-            val logitsTensor = output.get(outputName)
-                ?: throw RuntimeException("no output '$outputName' in model output")
+            val logitsTensorOpt = output.get(outputName)
+            if (logitsTensorOpt == null || !logitsTensorOpt.isPresent) {
+                throw RuntimeException("no output '$outputName' in model output")
+            }
+            val logitsTensor = logitsTensorOpt.get()
 
             // The value is [1, seq, vocab] as a nested array
-            @Suppress("UNCHECKED_CAST")
-            val raw = logitsTensor.value
-            val logits = extractLastLogits(raw)
+            val logits = extractLastLogits(logitsTensor.value)
 
             // Greedy: pick the argmax
             var bestId = 0L
