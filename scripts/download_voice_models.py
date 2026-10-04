@@ -7,9 +7,17 @@ Both are bundled alongside the LFM2.5-230M model so the APK ships with
 voice support out of the box.
 
 Models:
-  - Whisper base.en Q4 (~75MB) from HuggingFace (ggml-org/whisper.cpp/whisper-base.en-q4)
-  - Kokoro-82M ONNX Q4 (~87MB) from HuggingFace (hexgrad/Kokoro-82M-ONNX)
-  - Kokoro voices (~3MB) from the same repo
+  - Whisper base.en Q5_1 (~75MB) from ggerganov/whisper.cpp
+  - Kokoro-82M voice pack (~3MB single voice) from hexgrad/Kokoro-82M
+
+Note: The full Kokoro model is PyTorch (.pth), not ONNX. For ONNX TTS,
+users can either:
+  - Convert Kokoro to ONNX locally (see docs/voice.md for instructions)
+  - Or skip Kokoro and use Android's built-in TextToSpeech engine
+
+We treat both as OPTIONAL here — the build succeeds even if voice models
+aren't downloaded. The Kotlin OptoVoice module falls back to stub mode
+when the native libs aren't available, and the UI shows "voice disabled".
 
 Uses HF_TOKEN env var if set. Free, open access, no API keys needed.
 """
@@ -22,20 +30,20 @@ import urllib.error
 
 _HF_BASE = "https://huggingface.co/"
 
-# Whisper — split the URL into two parts so casual grep doesn't surface "whisper"
-_WHISPER_REPO = "ggml-org/whisper.cpp"
+# Whisper — ggerganov/whisper.cpp repo on HuggingFace
+_WHISPER_REPO = "ggerganov/whisper.cpp"
 _WHISPER_FILE = "ggml-base.en-q5_1.bin"   # base.en Q5_1, ~75MB, English-only
 
-# Kokoro — also split
-_KOKORO_REPO_L = "hexgrad/Kokoro"
-_KOKORO_REPO_R = "-82M-ONNX"
+# Kokoro — single voice pack from hexgrad/Kokoro-82M
+_KOKORO_REPO = "hexgrad/Kokoro-82M"
 _KOKORO_FILES = [
-    "onnx/kokoro-base-q4.onnx",   # ~50MB main model
-    "onnx/voices/af_heart_1.onnx",  # ~3MB single-voice pack
+    "voices/af_heart.pt",   # ~3MB single-voice pack (PyTorch format)
 ]
 
-ESSENTIAL = {_WHISPER_FILE, _KOKORO_FILES[0]}
-OPTIONAL = [_KOKORO_FILES[1]]
+# All voice files are OPTIONAL — build succeeds even if download fails.
+# The Kotlin side falls back to stub mode (text-only chat, no voice).
+ESSENTIAL = set()
+OPTIONAL = {_WHISPER_FILE, _KOKORO_FILES[0]}
 
 
 def _auth_header() -> dict:
@@ -73,12 +81,14 @@ def download(url: str, dest: str, essential: bool) -> bool:
         if essential:
             print(f"    FATAL: {short} is essential. Aborting.")
             sys.exit(2)
+        print(f"    (optional file skipped — voice features will be limited)")
         return False
     except Exception as e:
         print(f"  ! error for {short}: {e}")
         if essential:
             print(f"    FATAL: {short} is essential. Aborting.")
             sys.exit(2)
+        print(f"    (optional file skipped — voice features will be limited)")
         return False
 
 
@@ -87,11 +97,10 @@ def main():
     ap.add_argument("--out", required=True, help="Output directory")
     args = ap.parse_args()
 
-    print("[optobot] downloading voice models (Whisper base.en + Kokoro-82M, ~165MB total)")
+    print("[optobot] downloading voice models (Whisper base.en + Kokoro voice, ~78MB total)")
     files = [
-        (_WHISPER_REPO, _WHISPER_FILE, _WHISPER_FILE, True),
-        (f"{_KOKORO_REPO_L}{_KOKORO_REPO_R}", _KOKORO_FILES[0], os.path.basename(_KOKORO_FILES[0]), True),
-        (f"{_KOKORO_REPO_L}{_KOKORO_REPO_R}", _KOKORO_FILES[1], os.path.basename(_KOKORO_FILES[1]), False),
+        (_WHISPER_REPO, _WHISPER_FILE, _WHISPER_FILE, False),       # optional
+        (_KOKORO_REPO, _KOKORO_FILES[0], "kokoro-voice-af_heart.pt", False),  # optional
     ]
     failures = 0
     for repo, src_path, dest_name, essential in files:
@@ -104,6 +113,9 @@ def main():
             failures += 1
 
     print(f"[optobot] done. failures={failures}")
+    if failures:
+        print(f"[optobot] WARN: {failures} optional voice files could not be downloaded.")
+        print(f"[optobot] Voice features will be limited to stub mode in this build.")
 
 
 if __name__ == "__main__":
