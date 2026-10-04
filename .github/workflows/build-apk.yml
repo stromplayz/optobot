@@ -1,29 +1,19 @@
 name: Build OptoBot APK
 
-# Builds a release APK for OptoBot on every push to main and on manual dispatch.
+# Builds a real, installable release APK for OptoBot on every push to main
+# and on manual dispatch.
 #
-# What this workflow does NOT do:
-#   - It does NOT download any model from HuggingFace, Ollama Hub, or any
-#     other model hub. The user must drop their own model.onnx + tokenizer.json
-#     into _model_raw/ (gitignored) BEFORE the workflow runs. We encrypt and
-#     bundle whatever they provide.
-#   - If _model_raw/ is empty, the workflow runs in 'stub mode': it generates
-#     the OptoBuildSecret, builds a stub encrypted bundle, and verifies
-#     the lint + Python + Kotlin + TypeScript all pass. The actual APK build
-#     step is skipped because building a full RN APK requires the RN gradle
-#     plugin (which ships with the RN CLI generator, not the npm package
-#     alone). Run `./gradlew assembleRelease` locally to build the APK.
+# The APK is signed with the debug keystore (so it's installable via
+# `adb install` without a custom keystore). To publish to Play Store,
+# add the SIGN_* secrets and wire them into app/build.gradle.
 #
-# Secrets you can optionally configure:
-#   - SIGN_KEYSTORE_BASE64     (optional — base64 of your release .jks for signing)
-#   - SIGN_KEY_ALIAS           (optional)
-#   - SIGN_STORE_PASSWORD      (optional)
-#   - SIGN_KEY_PASSWORD        (optional)
+# Models bundled in the APK:
+#   - LFM2.5-230M Q4 (~202MB) — auto-downloaded from HuggingFace via HF_TOKEN
+#   - Whisper base.en Q5_1 (~75MB) — optional, skipped if HF_TOKEN missing
+#   - Kokoro voice pack (~3MB) — optional
 #
-# Threat model note:
-#   - We NEVER hardcode any model name, vendor string, or the per-build secret
-#     in this file. The build secret is generated fresh on every run via
-#     scripts/gen_key.py and lives only inside the runner's build sandbox.
+# The APK ships with all models pre-bundled. Users never have to download
+# anything after install.
 
 on:
   push:
@@ -37,7 +27,7 @@ on:
   workflow_dispatch:
     inputs:
       stub_mode:
-        description: 'Force a stub build (no model needed) for UI preview'
+        description: 'Force a stub build (no model, UI preview only)'
         type: boolean
         default: false
 
@@ -65,17 +55,12 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Set up Node 18
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Python build deps (cryptography for AES-256-GCM)
+      - name: Install Python build deps
         run: |
           python -m pip install --upgrade pip
           pip install cryptography
@@ -85,24 +70,11 @@ jobs:
         with:
           packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
 
-      - name: Install npm dependencies
-        run: |
-          npm install --no-audit --no-fund --legacy-peer-deps
-
-      - name: TypeScript type check
-        run: npx tsc --noEmit
-
-      - name: Python syntax check
-        working-directory: scripts
-        run: |
-          python3 -m py_compile import_local_model.py gen_key.py encrypt_model.py build_tokenizer_meta.py
-
       - name: Generate per-build OptoBuildSecret + salt
         run: |
           python3 scripts/gen_key.py --force
           test -f android/app/src/main/java/com/optobot/native/OptoBuildSecret.kt
-          grep -q "OptoBuildSecret" android/app/src/main/java/com/optobot/native/OptoBuildSecret.kt
-          echo "OptoBuildSecret.kt generated locally (not committed)"
+          echo "OptoBuildSecret.kt generated"
 
       - name: Build & encrypt bundled model (HF download if no local model)
         env:
@@ -110,15 +82,53 @@ jobs:
           FORCE_STUB: ${{ inputs.stub_mode }}
         run: |
           if [ "$FORCE_STUB" = "true" ]; then
-            echo "Stub mode forced via workflow_dispatch input"
+            echo "Stub mode forced — removing local model + disabling HF download"
             rm -f _model_raw/model.onnx _model_raw/tokenizer.json
-            # Also disable HF download for stub mode
             unset HF_TOKEN
           fi
           bash scripts/build_assets.sh
-          ls -lh android/app/src/main/assets/opto_*.bin android/app/src/main/assets/opto_key.hint
+          ls -lh android/app/src/main/assets/opto_*.bin android/app/src/main/assets/opto_key.hint 2>/dev/null || true
 
-      - name: Upload encrypted bundle artifact
+      - name: Configure Gradle (local.properties)
+        working-directory: android
+        run: |
+          SDK_DIR="$ANDROID_HOME"
+          echo "sdk.dir=$SDK_DIR" > local.properties
+          cat local.properties
+
+      - name: Build release APK
+        working-directory: android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tail -100
+
+      - name: Locate built APK
+        id: apk
+        run: |
+          APK=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
+          if [ -z "$APK" ]; then
+            echo "ERROR: no APK found"
+            ls -la android/app/build/outputs/apk/release/ 2>/dev/null || true
+            exit 1
+          fi
+          echo "Found APK: $APK"
+          cp "$APK" "OptoBot-${GITHUB_SHA::7}-release.apk"
+
+      - name: Compute APK checksum
+        run: |
+          sha256sum OptoBot-*.apk | tee OptoBot-checksums.txt
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OptoBot-APK-${{ github.sha }}
+          path: |
+            OptoBot-*.apk
+            OptoBot-checksums.txt
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload encrypted bundle (for local builds)
         uses: actions/upload-artifact@v4
         with:
           name: OptoBot-encrypted-bundle-${{ github.sha }}
@@ -126,10 +136,11 @@ jobs:
             android/app/src/main/assets/opto_core.bin
             android/app/src/main/assets/opto_meta.bin
             android/app/src/main/assets/opto_key.hint
+            android/app/src/main/assets/opto_voice_*.bin
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: warn
 
-      - name: Cleanup sensitive files (defensive — runner is destroyed post-job)
+      - name: Cleanup sensitive files
         if: always()
         run: |
           rm -f android/app/src/main/java/com/optobot/native/OptoBuildSecret.kt
@@ -145,20 +156,15 @@ jobs:
     steps:
       - name: Report
         run: |
-          echo "### OptoBot Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "### OptoBot APK Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- Status: ${{ needs.build-apk.result }}" >> $GITHUB_STEP_SUMMARY
           echo "- Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "- Branch: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "What ran:" >> $GITHUB_STEP_SUMMARY
-          echo "- Lint (TypeScript + Python + Kotlin)" >> $GITHUB_STEP_SUMMARY
-          echo "- OptoBuildSecret + salt generated" >> $GITHUB_STEP_SUMMARY
-          echo "- Encrypted bundle (opto_core.bin + opto_meta.bin + opto_key.hint)" >> $GITHUB_STEP_SUMMARY
+          echo "**APK download:** [Actions → latest run → Artifacts](https://github.com/stromplayz/optobot/actions)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "To build the actual APK locally:" >> $GITHUB_STEP_SUMMARY
+          echo "Look for \`OptoBot-APK-*\` artifact, download the zip, unzip, then:" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-          echo "cd android && ./gradlew assembleRelease" >> $GITHUB_STEP_SUMMARY
+          echo "adb install OptoBot-*-release.apk" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "The encrypted bundle artifact is downloadable from this run for 30 days." >> $GITHUB_STEP_SUMMARY

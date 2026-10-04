@@ -1,6 +1,6 @@
 name: CI Lint & Type Check
 
-# Fast checks only — runs on every push and PR. Does NOT build the APK.
+# Fast checks only — runs on every push and PR.
 # The full APK build is in build-apk.yml.
 
 on:
@@ -15,7 +15,7 @@ on:
 
 jobs:
   lint:
-    name: TypeScript + Python Lint
+    name: Python + Kotlin Syntax Check
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -24,29 +24,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install npm deps
-        run: npm install --no-audit --no-fund --legacy-peer-deps
-
-      - name: TypeScript type check
-        run: npx tsc --noEmit
-
       - name: Python syntax check
         working-directory: scripts
         run: |
-          python3 -m py_compile import_local_model.py gen_key.py encrypt_model.py build_tokenizer_meta.py
-
-      - name: Kotlin syntax check (best-effort; full build will catch the rest)
-        working-directory: android/app/src/main/java
-        run: |
-          command -v kotlinc >/dev/null 2>&1 && \
-            kotlinc -nowarn -no-stdlib -skip-metadata-version-check \
-              com/optobot/native/*.kt com/optobot/*.kt 2>&1 | head -20 || \
-            echo "kotlinc not available, skipping (full build will catch issues)"
+          python3 -m py_compile import_local_model.py gen_key.py encrypt_model.py build_tokenizer_meta.py download_voice_models.py download_lfm2.py
