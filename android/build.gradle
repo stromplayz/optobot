@@ -1,7 +1,7 @@
 // Root build.gradle — minimal, no React Native
 buildscript {
     ext {
-        kotlinVersion = "1.9.24"
+        kotlinVersion = "2.4.20"
         gradlePluginVersion = "8.5.0"
         minSdkVersion = 26
         compileSdkVersion = 34
