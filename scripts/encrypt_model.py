@@ -63,25 +63,31 @@ def derive_key(secret: str, salt: bytes) -> bytes:
 
 
 def encrypt_aes_gcm(key: bytes, plaintext_path: str, salt: bytes, out_path: str):
-    # Pure-Python AES-256-GCM via cryptography lib (already a standard dep).
+    """Encrypt the plaintext file with AES-256-GCM in a single shot.
+
+    The cryptography library's AESGCM class only supports one-shot encrypt()
+    on its Python API (the lower-level Cipher + ChaCha20Poly1305 interface
+    supports streaming, but AESGCM does not). For a ~200MB file on a CI
+    runner with 7GB RAM, one-shot is fine. We cap input at 1GB as a sanity
+    check.
+    """
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     iv = secrets.token_bytes(IV_LEN)
     aes = AESGCM(key)
-    # We stream the file in 4MB blocks. AES-GCM over a streaming input means
-    # we cannot chunk-then-stitch (the tag would be per-chunk); instead we
-    # load the whole input into memory only if it fits, OR we use the
-    # cryptography lib's encryptor() API to feed chunks into a single tag.
-    enc = aes.encryptor(iv, None, None)
+
+    # Read the full plaintext into memory
+    with open(plaintext_path, "rb") as f:
+        plaintext = f.read()
+    if len(plaintext) > 1_000_000_000:
+        raise ValueError(f"plaintext too large ({len(plaintext)} bytes) — cap is 1GB")
+
+    # One-shot encrypt (handles tag internally)
+    ciphertext = aes.encrypt(iv, plaintext, None)
+
     with open(out_path, "wb") as out:
         out.write(salt)            # 32 bytes
         out.write(iv)              # 12 bytes
-        with open(plaintext_path, "rb") as f:
-            while True:
-                buf = f.read(4 * 1024 * 1024)
-                if not buf:
-                    break
-                out.write(enc.update(buf))
-        out.write(enc.finalize())  # last block + tag
+        out.write(ciphertext)      # ciphertext + 16-byte GCM tag at the end
 
 
 def main():
