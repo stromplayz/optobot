@@ -96,7 +96,7 @@ object OptoReach {
 
         // Run all sources in parallel, wait for all to finish (max 12s)
         val threads = sources.map { (name, block) ->
-            Thread(block, "opto-search-$name").apply { isDaemon = true; start() }
+            Thread(Runnable { block() }, "opto-search-$name").apply { isDaemon = true; start() }
         }
         threads.forEach { it.join(12_000) }
 
