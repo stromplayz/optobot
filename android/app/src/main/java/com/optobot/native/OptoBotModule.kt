@@ -168,6 +168,68 @@ class OptoBotModule(reactContext: ReactApplicationContext) :
         engine.release()
     }
 
+    // ─────────────────────────────────────────────────────────────────
+    // OptoReach — on-device port of agent-reach HTTP channels.
+    // All calls are synchronous on a background thread. Each returns
+    // a ReadableMap: { ok: boolean, content: string, source: string, error: string }
+    // ─────────────────────────────────────────────────────────────────
+
+    private fun resolveReach(r: OptoReach.ReachResult, promise: Promise) {
+        val map = Arguments.createMap()
+        when (r) {
+            is OptoReach.ReachResult.Ok -> {
+                map.putBoolean("ok", true)
+                map.putString("content", r.content)
+                map.putString("source", r.source)
+            }
+            is OptoReach.ReachResult.Error -> {
+                map.putBoolean("ok", false)
+                map.putString("error", r.message)
+            }
+        }
+        promise.resolve(map)
+    }
+
+    @ReactMethod
+    fun reachWeb(url: String, promise: Promise) {
+        Thread {
+            try { resolveReach(OptoReach.web(url), promise) }
+            catch (t: Throwable) { promise.reject("OPTO_REACH_FAIL", t.message, t) }
+        }.start()
+    }
+
+    @ReactMethod
+    fun reachSearch(query: String, promise: Promise) {
+        Thread {
+            try { resolveReach(OptoReach.search(query), promise) }
+            catch (t: Throwable) { promise.reject("OPTO_REACH_FAIL", t.message, t) }
+        }.start()
+    }
+
+    @ReactMethod
+    fun reachYouTube(input: String, promise: Promise) {
+        Thread {
+            try { resolveReach(OptoReach.youtube(input), promise) }
+            catch (t: Throwable) { promise.reject("OPTO_REACH_FAIL", t.message, t) }
+        }.start()
+    }
+
+    @ReactMethod
+    fun reachRSS(url: String, promise: Promise) {
+        Thread {
+            try { resolveReach(OptoReach.rss(url), promise) }
+            catch (t: Throwable) { promise.reject("OPTO_REACH_FAIL", t.message, t) }
+        }.start()
+    }
+
+    @ReactMethod
+    fun reachGitHub(repoInput: String, promise: Promise) {
+        Thread {
+            try { resolveReach(OptoReach.github(repoInput), promise) }
+            catch (t: Throwable) { promise.reject("OPTO_REACH_FAIL", t.message, t) }
+        }.start()
+    }
+
     @ReactMethod
     fun addListener(eventName: String) { /* no-op, required for emit subscription */ }
 

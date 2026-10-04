@@ -13,8 +13,10 @@ interface ChatStore {
 
   appendUser: (content: string) => string
   appendAssistantPlaceholder: () => string
+  appendSystem: (content: string) => string
   patchAssistant: (id: string, content: string, opts?: { streaming?: boolean; error?: boolean }) => void
   finalizeAssistant: (id: string, content: string, opts?: { error?: boolean }) => void
+  finalizeSystem: (id: string, content: string, opts?: { error?: boolean }) => void
   setLoadState: (s: Partial<LoadState>) => void
   clear: () => void
 }
@@ -48,6 +50,26 @@ export const useChatStore = create<ChatStore>()(
         }
         set((s) => ({ messages: [...s.messages, msg] }))
         return id
+      },
+
+      appendSystem: (content) => {
+        const id = uuid()
+        const msg: ChatMessage = {
+          id,
+          role: 'system',
+          content,
+          createdAt: Date.now(),
+        }
+        set((s) => ({ messages: [...s.messages, msg] }))
+        return id
+      },
+
+      finalizeSystem: (id, content, opts) => {
+        set((s) => ({
+          messages: s.messages.map((m) =>
+            m.id === id ? { ...m, content, streaming: false, error: opts?.error } : m
+          ),
+        }))
       },
 
       patchAssistant: (id, content, opts) => {

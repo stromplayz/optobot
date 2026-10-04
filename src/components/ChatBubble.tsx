@@ -1,5 +1,9 @@
 /**
- * ChatBubble — single message card, user or assistant.
+ * ChatBubble — single message card: user, assistant, or system.
+ *
+ * System messages are render-only — they show fetched content from OptoReach
+ * (web pages, YouTube transcripts, RSS, GitHub repos, search results) so the
+ * user can see what the AI actually saw.
  */
 import React from 'react'
 import { View, Text, StyleSheet } from 'react-native'
@@ -9,12 +13,14 @@ import { spacing, radii, shadows } from '../theme/spacing'
 import { ChatMessage } from '../types/chat'
 
 export function ChatBubble({ message }: { message: ChatMessage }) {
+  if (message.role === 'system') {
+    return <SystemBubble message={message} />
+  }
   const isUser = message.role === 'user'
   const wrapStyle = isUser ? styles.userWrap : styles.assistantWrap
   const bubbleStyle = isUser ? styles.userBubble : styles.assistantBubble
   const textStyle = isUser ? styles.userText : styles.assistantText
 
-  const showCursor = message.streaming && !isUser && message.content.length === 0
   const showStreaming = message.streaming && !isUser && message.content.length > 0
   const showTyping = message.streaming && !isUser && message.content.length === 0
 
@@ -33,6 +39,20 @@ export function ChatBubble({ message }: { message: ChatMessage }) {
       {message.error && (
         <Text style={styles.errorLabel}>generation interrupted — please retry</Text>
       )}
+    </View>
+  )
+}
+
+function SystemBubble({ message }: { message: ChatMessage }) {
+  const isFetching = message.content.startsWith('⏳')
+  return (
+    <View style={styles.systemWrap}>
+      <View style={styles.systemBubble}>
+        <Text style={styles.systemLabel}>
+          {isFetching ? '· fetching ·' : '· context ·'}
+        </Text>
+        <Text style={styles.systemText}>{message.content}</Text>
+      </View>
     </View>
   )
 }
@@ -64,5 +84,32 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.danger,
     marginTop: spacing.xs,
+  },
+  systemWrap: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginBottom: spacing.md,
+    paddingHorizontal: spacing.sm,
+  },
+  systemBubble: {
+    backgroundColor: colors.surfaceAlt,
+    paddingHorizontal: spacing.base,
+    paddingVertical: spacing.md,
+    borderRadius: radii.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    maxWidth: '100%',
+  },
+  systemLabel: {
+    ...typography.caption,
+    color: colors.accent,
+    fontWeight: '700',
+    marginBottom: spacing.xs,
+    letterSpacing: 0.5,
+  },
+  systemText: {
+    ...typography.small,
+    color: colors.textMuted,
+    fontFamily: 'monospace',
   },
 })

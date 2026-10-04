@@ -81,9 +81,10 @@ optobot/
 │   ├── theme/{colors,spacing,typography,fonts}.ts
 │   ├── types/chat.ts
 │   └── utils/id.ts
+├── _model_raw/              ← YOU DROP YOUR model.onnx + tokenizer.json here
 ├── scripts/
-│   ├── build_assets.sh        ← one-shot pipeline
-│   ├── download_lfm2.py      ← HuggingFace fetch (URL split for stealth)
+│   ├── build_assets.sh        ← one-shot pipeline (encrypt + bundle)
+│   ├── import_local_model.py  ← copy your own ONNX + tokenizer into _model_raw/
 │   ├── gen_key.py             ← write OptoBuildSecret.kt + opto_key.hint
 │   ├── encrypt_model.py       ← ONNX → opto_core.bin (AES-256-GCM)
 │   └── build_tokenizer_meta.py ← tokenizer.json → opto_meta.bin
@@ -137,12 +138,12 @@ optobot/
 
 ### Prerequisites
 
-- Node 18+, JDK 17, Android SDK + NDK 27.0.12075200
+- Node 18+, JDK 17, Android SDK + NDK (any version ≥ 27)
 - Python 3.10+ with `pip install cryptography`
 - An Android device or emulator with 4 GB+ RAM (arm64 or x86_64)
-- HuggingFace access if the LFM2 repo requires auth (set
-  `HF_TOKEN` env var; the download script passes it via the Authorization
-  header if present)
+- **Your own ONNX model** — we do NOT download from HuggingFace or any other
+  model hub. Bring your own `model.onnx` + `tokenizer.json` and drop them
+  into `_model_raw/` (gitignored). See "Bring your own model" below.
 
 ### Install
 
@@ -150,12 +151,22 @@ optobot/
 cd optobot
 yarn install         # or npm install
 
+# Drop your own ONNX model + tokenizer into _model_raw/ first.
+# Either copy them manually, or use the helper:
+python3 scripts/import_local_model.py \
+    --model /path/to/your/model.onnx \
+    --tokenizer /path/to/your/tokenizer.json
+
 # Generate the per-build secret + salt (one-time per release build)
 python3 scripts/gen_key.py --force
 
-# Download the raw model + tokenizer and encrypt into assets/
+# Encrypt your model + tokenizer and bundle into assets/
 bash scripts/build_assets.sh
 ```
+
+If `_model_raw/` is empty, `build_assets.sh` produces a **stub bundle**
+so you can preview the UI without a real model — the chat UI works, slash
+commands work, but the AI responses are mock placeholder text.
 
 After `build_assets.sh` completes, you should see:
 
@@ -218,6 +229,50 @@ What we deliberately DO NOT defend against:
 
 ---
 
+## OptoReach — agent-reach integration
+
+The on-device AI is no longer locked in a box. We ported the HTTP-only
+channels of [agent-reach](https://github.com/Panniantong/agent-reach) to
+Kotlin so OptoBot can reach the internet directly from the phone — no
+server, no proxy, no API keys.
+
+### Available slash commands
+
+| Command | Example | What it does |
+|---------|---------|--------------|
+| `/web`   | `/web https://example.com/article`         | Fetch any web page as Markdown (via Jina Reader, free) |
+| `/search`| `/search on-device LLM benchmark 2026`     | Web search via DuckDuckGo HTML (no API key) |
+| `/yt`    | `/yt https://youtu.be/dQw4w9WgXcQ`         | Fetch a YouTube video transcript |
+| `/rss`   | `/rss https://news.ycombinator.com/rss`    | Read an RSS / Atom feed |
+| `/gh`    | `/gh Panniantong/agent-reach`              | Fetch a public GitHub repo's README + metadata |
+
+Type `/` in the chat input to see a suggestion picker.
+
+When you send a slash command:
+1. The chat shows your command as a normal user message.
+2. A "fetching..." system message appears.
+3. The fetch runs on a background thread; the result is injected into the
+   chat as a `· context ·` system message that the AI can see.
+4. OptoBot automatically sends a follow-up prompt so the AI summarizes
+   or answers based on the fetched content.
+
+### Channels we deliberately skip
+
+- **Twitter, Reddit, Instagram, XiaoHongShu, Facebook, LinkedIn** — these
+  require authenticated browser sessions or cookies. Not appropriate for
+  a private Android app. If you need them, run `agent-reach` on your
+  desktop and paste the result into OptoBot.
+- **Bilibili, Boss** — same reason.
+
+### Privacy
+
+All `OptoReach` calls go through the phone's own network. No proxy
+through any OptoBot server. The user always sees a "fetching" indicator
+before any URL is hit. Reach calls are opt-in — they only happen when the
+user types a slash command, never automatically.
+
+---
+
 ## Extending OptoBot
 
 - **Add a second model size**: drop another `opto_core_tiny.bin` in assets,
@@ -250,20 +305,28 @@ This repo ships two workflows under `.github/workflows/`:
 
 | Secret name              | Required? | Purpose                                             |
 |--------------------------|-----------|-----------------------------------------------------|
-| `HF_TOKEN`               | Optional  | Only if the HuggingFace model repo is gated for you |
 | `SIGN_KEYSTORE_BASE64`   | Optional  | Base64 of your release `.jks` for signed APK        |
 | `SIGN_KEY_ALIAS`         | Optional  | Keystore alias for the signing key                  |
 | `SIGN_STORE_PASSWORD`    | Optional  | Keystore password                                   |
 | `SIGN_KEY_PASSWORD`     | Optional  | Key password                                         |
+
+**No `HF_TOKEN` needed.** We don't download anything. You bring your own
+ONNX model — drop it into `_model_raw/` and push to `main` to trigger a
+real APK build.
+
+If `_model_raw/` is empty, the workflow produces a **stub APK** so the UI
+can still be previewed. To force a stub build on demand, run the workflow
+with the `stub_mode` checkbox ticked.
 
 If signing secrets are absent, the workflow produces an **unsigned release
 APK**. You can still install it with `adb install` during development.
 
 ### Trigger a manual build
 
-Go to **Actions** → **Build OptoBot APK** → **Run workflow** → pick the
-model size (1.2B / 350M / 3B) → click **Run workflow**. The APK appears as
-a downloadable artifact on the run summary page within ~30 minutes.
+Go to **Actions** → **Build OptoBot APK** → **Run workflow** → tick
+`stub_mode` if you want a UI-only preview, or leave it unchecked to build
+a real APK from the model in `_model_raw/`. The APK appears as a
+downloadable artifact on the run summary page within ~30 minutes.
 
 ### ⚠ Security reminder — rotate the GitHub PAT you used to push
 

@@ -1,13 +1,19 @@
 /**
- * ChatInput — rounded, warm-minimal input bar with send button.
+ * ChatInput — rounded, warm-minimal input bar with send button + slash-command picker.
+ *
+ * When the user types `/`, a small suggestion list appears with the OptoReach
+ * commands (/web, /search, /yt, /rss, /gh). Selecting one fills the input with
+ * the example template.
  */
 import React, { useState } from 'react'
 import {
   View, TextInput, StyleSheet, TouchableOpacity, Text, ActivityIndicator,
+  FlatList,
 } from 'react-native'
 import { colors } from '../theme/colors'
 import { typography } from '../theme/typography'
 import { spacing, radii } from '../theme/spacing'
+import { REACH_SUGGESTIONS } from '../native/OptoReach'
 
 interface Props {
   onSubmit: (text: string) => void
@@ -19,6 +25,7 @@ interface Props {
 export function ChatInput({ onSubmit, onStop, isGenerating, disabled }: Props) {
   const [text, setText] = useState('')
   const canSend = text.trim().length > 0 && !isGenerating && !disabled
+  const showSlashPicker = text.startsWith('/') && !text.includes(' ')
 
   function handleSend() {
     if (!canSend) return
@@ -30,14 +37,38 @@ export function ChatInput({ onSubmit, onStop, isGenerating, disabled }: Props) {
     onStop()
   }
 
+  function pickSuggestion(example: string) {
+    setText(example + ' ')
+  }
+
   return (
     <View style={styles.wrap}>
+      {showSlashPicker && (
+        <View style={styles.slashPicker}>
+          <Text style={styles.slashHeader}>OptoReach commands:</Text>
+          <FlatList
+            data={REACH_SUGGESTIONS}
+            keyExtractor={(item) => item.cmd}
+            renderItem={({ item }) => (
+              <TouchableOpacity
+                style={styles.slashItem}
+                onPress={() => pickSuggestion(item.example)}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.slashCmd}>{item.cmd}</Text>
+                <Text style={styles.slashDesc}>{item.desc}</Text>
+                <Text style={styles.slashExample}>{item.example}</Text>
+              </TouchableOpacity>
+            )}
+          />
+        </View>
+      )}
       <View style={styles.inputBox}>
         <TextInput
           style={styles.input}
           value={text}
           onChangeText={setText}
-          placeholder={disabled ? 'Warming up the engine…' : 'Ask OptoBot anything…'}
+          placeholder={disabled ? 'Warming up the engine…' : 'Ask OptoBot anything… (/ for tools)'}
           placeholderTextColor={colors.textFaint}
           multiline
           maxLength={4000}
@@ -75,6 +106,46 @@ const styles = StyleSheet.create({
     backgroundColor: colors.bg,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.border,
+  },
+  slashPicker: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.lg,
+    padding: spacing.sm,
+    marginBottom: spacing.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    maxHeight: 220,
+  },
+  slashHeader: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontWeight: '700',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    letterSpacing: 0.5,
+  },
+  slashItem: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    borderRadius: radii.sm,
+  },
+  slashCmd: {
+    ...typography.body,
+    color: colors.accent,
+    fontFamily: 'monospace',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  slashDesc: {
+    ...typography.small,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  slashExample: {
+    ...typography.caption,
+    color: colors.textFaint,
+    fontFamily: 'monospace',
+    marginTop: 4,
   },
   inputBox: {
     flexDirection: 'row',

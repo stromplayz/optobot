@@ -42,6 +42,18 @@ export interface OptoBotNativeShape {
   /** Check whether tools are permitted (consent given). */
   toolsGranted(): Promise<boolean>
 
+  // ---- OptoReach: on-device port of agent-reach channels ----
+  /** Fetch any web page as Markdown (via Jina Reader, free, no API key). */
+  reachWeb(url: string): Promise<ReachResult>
+  /** Web search via DuckDuckGo HTML (no API key). */
+  reachSearch(query: string): Promise<ReachResult>
+  /** Fetch a YouTube video transcript (English). */
+  reachYouTube(input: string): Promise<ReachResult>
+  /** Fetch and summarize an RSS / Atom feed. */
+  reachRSS(url: string): Promise<ReachResult>
+  /** Fetch a public GitHub repo's README + metadata. */
+  reachGitHub(repoInput: string): Promise<ReachResult>
+
   /** Constants exported from Kotlin. */
   EVENT_LOAD_PROGRESS: string
   EVENT_TOKEN: string
@@ -49,6 +61,13 @@ export interface OptoBotNativeShape {
   EVENT_ERROR: string
   MAX_CONTEXT_TOKENS: number
   MAX_NEW_TOKENS: number
+}
+
+export interface ReachResult {
+  ok: boolean
+  content: string
+  source: string
+  error?: string
 }
 
 const real = NativeModules.OptoBot as OptoBotNativeShape | undefined
@@ -91,6 +110,48 @@ function ensureMock(): OptoBotNativeShape {
     },
     async mkdir(_relPath: string) { /* no-op in mock */ },
     async toolsGranted() { return true },
+
+    // ---- Mock OptoReach (web preview only — returns canned text) ----
+    async reachWeb(url: string) {
+      await new Promise((r) => setTimeout(r, 600))
+      return {
+        ok: true,
+        content: `[MOCK WEB FETCH] Would fetch ${url} on Android via Jina Reader.\n\nIn production, this returns the page content as Markdown. On web preview we don't actually hit the network to keep things self-contained.`,
+        source: `mock:${url}`,
+      }
+    },
+    async reachSearch(query: string) {
+      await new Promise((r) => setTimeout(r, 800))
+      return {
+        ok: true,
+        content: `[MOCK SEARCH] Query: "${query}"\n\n- [Example result 1](https://example.com/1)\n  Snippet about ${query}.\n- [Example result 2](https://example.com/2)\n  Another snippet about ${query}.`,
+        source: `mock-search:${query}`,
+      }
+    },
+    async reachYouTube(input: string) {
+      await new Promise((r) => setTimeout(r, 700))
+      return {
+        ok: true,
+        content: `[MOCK YOUTUBE] Transcript for ${input}.\n\nWould fetch the English timedtext track from video.google.com/timedtext and parse the XML.`,
+        source: `mock-yt:${input}`,
+      }
+    },
+    async reachRSS(url: string) {
+      await new Promise((r) => setTimeout(r, 600))
+      return {
+        ok: true,
+        content: `[MOCK RSS] Feed ${url}.\n\n- Item 1: title + link + snippet\n- Item 2: title + link + snippet\n- ...`,
+        source: `mock-rss:${url}`,
+      }
+    },
+    async reachGitHub(repoInput: string) {
+      await new Promise((r) => setTimeout(r, 800))
+      return {
+        ok: true,
+        content: `[MOCK GITHUB] Repo ${repoInput}.\n\nStars: 89,998 | Language: Python\nDescription: Give your AI agent eyes to see the entire internet.\n\n--- README ---\n\n(Agent-Reach README would appear here in production.)`,
+        source: `mock-gh:${repoInput}`,
+      }
+    },
   }
   return mock
 }

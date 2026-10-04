@@ -1,22 +1,28 @@
 name: Build OptoBot APK
 
 # Builds a release APK for OptoBot on every push to main and on manual dispatch.
-# Secrets required (configure under Settings → Secrets and variables → Actions):
-#   - HF_TOKEN  (optional — only if the LFM2 HuggingFace repo is gated for your account)
+#
+# What this workflow does NOT do:
+#   - It does NOT download any model from HuggingFace, Ollama Hub, or any
+#     other model hub. The user must drop their own model.onnx + tokenizer.json
+#     into _model_raw/ (gitignored) BEFORE the workflow runs. We encrypt and
+#     bundle whatever they provide.
+#   - If _model_raw/ is empty, the workflow builds a "stub" APK with a mock
+#     engine so the UI can be previewed. The app still installs and shows
+#     the chat UI; the model just won't generate real responses.
+#
+# Secrets you can optionally configure:
 #   - SIGN_KEYSTORE_BASE64     (optional — base64 of your release .jks for signing)
 #   - SIGN_KEY_ALIAS           (optional)
 #   - SIGN_STORE_PASSWORD      (optional)
 #   - SIGN_KEY_PASSWORD        (optional)
 #
-# If signing secrets are absent, the workflow produces an unsigned release APK
-# (still runnable on devices via `adb install`).
-#
 # Threat model note:
 #   - We NEVER hardcode any model name, vendor string, or the per-build secret
 #     in this file. The build secret is generated fresh on every run via
 #     scripts/gen_key.py and lives only inside the runner's build sandbox.
-#   - OptoBuildSecret.kt is generated at workflow run-time, used for the build,
-#     and discarded. It is never committed to git.
+#   - OptoBuildSecret.kt is generated at workflow run-time, used for the
+#     build, and discarded. It is never committed to git.
 
 on:
   push:
@@ -29,16 +35,11 @@ on:
       - master
   workflow_dispatch:
     inputs:
-      model_size:
-        description: 'Which LFM size to bundle'
-        type: choice
-        options:
-          - LFM2-1.2B-ONNX-INT4
-          - LFM2-350M-ONNX-INT4
-          - LFM2-3B-ONNX-INT4
-        default: LFM2-1.2B-ONNX-INT4
+      stub_mode:
+        description: 'Force a stub build (no model needed) for UI preview'
+        type: boolean
+        default: false
 
-# Only one APK build at a time per branch.
 concurrency:
   group: build-apk-${{ github.ref }}
   cancel-in-progress: true
@@ -76,16 +77,12 @@ jobs:
       - name: Install Python build deps (cryptography for AES-256-GCM)
         run: |
           python -m pip install --upgrade pip
-          pip install cryptography requests
+          pip install cryptography
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
           packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
-          # NDK is preinstalled on ubuntu-latest runners (~r27d). We don't
-          # pin a specific NDK version because the runner's preinstalled
-          # version is the most reliable. If you need a pinned NDK, override
-          # here and in android/local.properties.
 
       - name: Install npm dependencies
         run: |
@@ -98,20 +95,20 @@ jobs:
           grep -q "OptoBuildSecret" android/app/src/main/java/com/optobot/native/OptoBuildSecret.kt
           echo "OptoBuildSecret.kt generated locally (not committed)"
 
-      - name: Download model + encrypt bundled assets
+      - name: Build & encrypt bundled model (or stub if no model is provided)
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_STUB: ${{ inputs.stub_mode }}
         run: |
+          if [ "$FORCE_STUB" = "true" ]; then
+            echo "Stub mode forced via workflow_dispatch input"
+            rm -f _model_raw/model.onnx _model_raw/tokenizer.json
+          fi
           bash scripts/build_assets.sh
-          test -f android/app/src/main/assets/opto_core.bin
-          test -f android/app/src/main/assets/opto_meta.bin
-          test -f android/app/src/main/assets/opto_key.hint
           ls -lh android/app/src/main/assets/opto_*.bin android/app/src/main/assets/opto_key.hint
 
       - name: Configure Gradle
         working-directory: android
         run: |
-          # Locate the preinstalled NDK and write local.properties
           SDK_DIR="$ANDROID_HOME"
           NDK_DIR=$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | head -1)
           if [ -z "$NDK_DIR" ]; then
@@ -186,3 +183,6 @@ jobs:
           echo "- Branch: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Download the APK from the workflow run page (Artifacts section, retained 30 days)." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**To build with a real model:** drop your \`model.onnx\` + \`tokenizer.json\` into \`_model_raw/\` and push to main." >> $GITHUB_STEP_SUMMARY
+          echo "**For UI preview only:** trigger this workflow with the 'stub_mode' input checked." >> $GITHUB_STEP_SUMMARY
