@@ -365,7 +365,10 @@ private fun AIEye(state: VoiceState, modifier: Modifier = Modifier) {
             VoiceState.CONFIRMING -> 0.65f
             VoiceState.IDLE -> 0.25f
         },
-        animationSpec = tween(500, easing = EaseInOutCubic),
+        animationSpec = infiniteRepeatable(
+            tween(500, easing = EaseInOutCubic),
+            RepeatMode.Reverse,
+        ),
         label = "glow",
     )
     val waveScale by infiniteTransition.animateFloat(
