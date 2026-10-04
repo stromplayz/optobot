@@ -100,7 +100,15 @@ jobs:
         working-directory: android
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tail -100
+          ./gradlew assembleRelease --no-daemon 2>&1 | tee build-output.log
+          # Check if APK was produced
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
+          if [ -z "$APK" ]; then
+            echo "ERROR: no APK found"
+            echo "--- last 50 lines of build log ---"
+            tail -50 build-output.log
+            exit 1
+          fi
 
       - name: Locate built APK
         id: apk
