@@ -9,6 +9,8 @@ android/app/release/
 *.aab
 *.keystore
 *.jks
+# Exception: debug.keystore is needed for CI to sign release APKs
+!android/app/debug.keystore
 
 # OptoBuildSecret — NEVER commit. Per-build, regenerated.
 android/app/src/main/java/com/optobot/native/OptoBuildSecret.kt
