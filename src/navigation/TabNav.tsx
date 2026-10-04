@@ -1,34 +1,35 @@
 /**
- * TabNav — bottom tab navigation between Chat / Tools / Profile.
+ * TabNav — bottom tab navigation between Voice / Chat / Profile.
  *
- * Lightweight custom implementation (no extra dep) so we control the warm
- * minimal aesthetic precisely.
+ * Voice is the primary interface (default tab). Chat is still there for users
+ * who prefer typing. Tools tab is gone — file operations happen via voice
+ * and the confirmation flow.
  */
 import React, { useState } from 'react'
 import { View, Text, StyleSheet, TouchableOpacity, SafeAreaView } from 'react-native'
 import { colors } from '../theme/colors'
 import { typography } from '../theme/typography'
-import { spacing, radii } from '../theme/spacing'
+import { spacing } from '../theme/spacing'
+import { VoiceScreen } from '../screens/VoiceScreen'
 import { ChatScreen } from '../screens/ChatScreen'
-import { ToolsScreen } from '../screens/ToolsScreen'
 import { ProfileScreen } from '../screens/ProfileScreen'
 
-type Tab = 'chat' | 'tools' | 'profile'
+type Tab = 'voice' | 'chat' | 'profile'
 
 export function TabNav() {
-  const [active, setActive] = useState<Tab>('chat')
+  const [active, setActive] = useState<Tab>('voice')
 
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.flex}>
+        {active === 'voice' && <VoiceScreen />}
         {active === 'chat' && <ChatScreen />}
-        {active === 'tools' && <ToolsScreen />}
         {active === 'profile' && <ProfileScreen />}
       </View>
 
       <View style={styles.tabBar}>
-        <TabBtn label="Chat" icon="◑" active={active === 'chat'} onPress={() => setActive('chat')} />
-        <TabBtn label="Tools" icon="≡" active={active === 'tools'} onPress={() => setActive('tools')} />
+        <TabBtn label="Voice" icon="◑" active={active === 'voice'} onPress={() => setActive('voice')} />
+        <TabBtn label="Chat" icon="✎" active={active === 'chat'} onPress={() => setActive('chat')} />
         <TabBtn label="Profile" icon="◯" active={active === 'profile'} onPress={() => setActive('profile')} />
       </View>
     </SafeAreaView>

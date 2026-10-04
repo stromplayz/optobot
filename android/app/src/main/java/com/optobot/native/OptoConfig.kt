@@ -73,4 +73,9 @@ object OptoConfig {
 
     /** Error event name */
     const val EVENT_ERROR = "opto:error"
+
+    // ─── OptoVoice events ───
+    const val EVENT_WAKE_WORD = "opto:wakeWord"
+    const val EVENT_TRANSCRIPT = "opto:transcript"
+    const val EVENT_TTS_DONE = "opto:ttsDone"
 }

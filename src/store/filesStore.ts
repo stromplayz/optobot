@@ -18,6 +18,8 @@ interface FilesStore {
   search: (query: string) => OptoNote[]
   /** Ensure seed notes exist on first run */
   ensureSeeded: () => void
+  /** Save a recorded consultation transcript as a 'soap' note. */
+  saveRecording: (filename: string, content: string) => string
 }
 
 export const useFilesStore = create<FilesStore>()(
@@ -64,6 +66,11 @@ export const useFilesStore = create<FilesStore>()(
           return { ...s, id: uuid(), createdAt: now, updatedAt: now } as OptoNote
         })
         set({ notes: seed, seeded: true })
+      },
+
+      saveRecording: (filename, content) => {
+        const title = filename.replace(/\.md$/i, '').replace(/^recording-/i, 'recording ')
+        return get().createNote('soap', title, content, ['recording', 'auto-saved'])
       },
     }),
     {

@@ -65,8 +65,21 @@ export interface OptoBotNativeShape {
   EVENT_TOKEN: string
   EVENT_DONE: string
   EVENT_ERROR: string
+  EVENT_WAKE_WORD: string
+  EVENT_TRANSCRIPT: string
+  EVENT_TTS_DONE: string
   MAX_CONTEXT_TOKENS: number
   MAX_NEW_TOKENS: number
+
+  // ─── OptoVoice: on-device STT + TTS + wake word ───
+  voiceAvailable(): Promise<boolean>
+  startWakeWordListener(): Promise<boolean>
+  stopWakeWordListener(): Promise<boolean>
+  listenOnce(): Promise<string>
+  startRecording(): Promise<boolean>
+  stopRecording(): Promise<string | null>
+  speak(text: string): Promise<boolean>
+  stopSpeaking(): Promise<boolean>
 }
 
 export interface ReachResult {
@@ -86,6 +99,9 @@ function ensureMock(): OptoBotNativeShape {
     EVENT_TOKEN: 'opto:token',
     EVENT_DONE: 'opto:done',
     EVENT_ERROR: 'opto:error',
+    EVENT_WAKE_WORD: 'opto:wakeWord',
+    EVENT_TRANSCRIPT: 'opto:transcript',
+    EVENT_TTS_DONE: 'opto:ttsDone',
     MAX_CONTEXT_TOKENS: 2048,
     MAX_NEW_TOKENS: 512,
     async load() { /* no-op */ },
@@ -182,6 +198,49 @@ function ensureMock(): OptoBotNativeShape {
         source: `mock-books:${query}`,
       }
     },
+
+    // ─── Mock OptoVoice (web preview only) ───
+    async voiceAvailable() { return false },
+    async startWakeWordListener() {
+      const mockWakeWordLoop = () => {
+        if (mockStopRequested) return
+        const delay = 3000 + Math.random() * 5000
+        setTimeout(() => {
+          if (mockStopRequested) return
+          mockListeners.forEach((l) => l('opto:wakeWord', {}))
+          mockWakeWordLoop()
+        }, delay)
+      }
+      mockWakeWordLoop()
+      return true
+    },
+    async stopWakeWordListener() { return true },
+    async listenOnce() {
+      await new Promise((r) => setTimeout(r, 1500))
+      const samples = [
+        'hello optobot',
+        'what is glaucoma',
+        'help me write a soap note',
+        'search for recent research on anti-vegf',
+        'start recording',
+      ]
+      return samples[Math.floor(Math.random() * samples.length)]
+    },
+    async startRecording() { await new Promise((r) => setTimeout(r, 200)); return true },
+    async stopRecording() {
+      await new Promise((r) => setTimeout(r, 200))
+      setTimeout(() => {
+        const transcript = '[MOCK RECORDING] Patient is a 47-year-old male, MR ID 123, presents with type 2 diabetes mellitus, complains of blurred vision in the right eye for two weeks. No history of ocular trauma. Family history positive for glaucoma.'
+        mockListeners.forEach((l) => l('opto:transcript', { transcript, file: '/tmp/mock-recording.wav' }))
+      }, 2000)
+      return '/tmp/mock-recording.wav'
+    },
+    async speak(text: string) {
+      await new Promise((r) => setTimeout(r, Math.max(800, text.length * 50)))
+      mockListeners.forEach((l) => l('opto:ttsDone', {}))
+      return true
+    },
+    async stopSpeaking() { return true },
   }
   return mock
 }
@@ -329,6 +388,9 @@ export function subscribeOptoEvents(callback: MockListener): () => void {
       emitter.addListener('opto:token', (p) => callback('opto:token', p)),
       emitter.addListener('opto:done', (p) => callback('opto:done', p)),
       emitter.addListener('opto:error', (p) => callback('opto:error', p)),
+      emitter.addListener('opto:wakeWord', (p) => callback('opto:wakeWord', p)),
+      emitter.addListener('opto:transcript', (p) => callback('opto:transcript', p)),
+      emitter.addListener('opto:ttsDone', (p) => callback('opto:ttsDone', p)),
     ]
     return () => subs.forEach(s => s.remove())
   }

@@ -36,6 +36,7 @@ class OptoBotModule(reactContext: ReactApplicationContext) :
 
     private val engine = OptoInferenceEngine(reactContext)
     private val fileTools = OptoFileTools(reactContext)
+    private val voice = OptoVoice(reactContext)
     private val callCounter = AtomicLong(0)
 
     override fun getName(): String = "OptoBot"
@@ -45,6 +46,9 @@ class OptoBotModule(reactContext: ReactApplicationContext) :
         "EVENT_TOKEN" to OptoConfig.EVENT_TOKEN,
         "EVENT_DONE" to OptoConfig.EVENT_DONE,
         "EVENT_ERROR" to OptoConfig.EVENT_ERROR,
+        "EVENT_WAKE_WORD" to OptoConfig.EVENT_WAKE_WORD,
+        "EVENT_TRANSCRIPT" to OptoConfig.EVENT_TRANSCRIPT,
+        "EVENT_TTS_DONE" to OptoConfig.EVENT_TTS_DONE,
         "MAX_CONTEXT_TOKENS" to OptoConfig.MAX_CONTEXT_TOKENS,
         "MAX_NEW_TOKENS" to OptoConfig.MAX_NEW_TOKENS
     )
@@ -252,6 +256,78 @@ class OptoBotModule(reactContext: ReactApplicationContext) :
             try { resolveReach(OptoReach.books(query), promise) }
             catch (t: Throwable) { promise.reject("OPTO_REACH_FAIL", t.message, t) }
         }.start()
+    }
+
+    // ─── OptoVoice: on-device STT + TTS + wake word ───
+
+    @ReactMethod
+    fun voiceAvailable(promise: Promise) { promise.resolve(voice.isReady) }
+
+    @ReactMethod
+    fun startWakeWordListener(promise: Promise) {
+        val ctx = reactApplicationContext
+        Thread {
+            try {
+                voice.startWakeWordListener {
+                    emit(ctx, OptoConfig.EVENT_WAKE_WORD, Arguments.createMap())
+                }
+                promise.resolve(true)
+            } catch (t: Throwable) {
+                promise.reject("OPTO_VOICE_FAIL", t.message, t)
+            }
+        }.start()
+    }
+
+    @ReactMethod
+    fun stopWakeWordListener(promise: Promise) {
+        voice.stopWakeWordListener()
+        promise.resolve(true)
+    }
+
+    @ReactMethod
+    fun listenOnce(promise: Promise) {
+        Thread {
+            try { promise.resolve(voice.listenOnce() ?: "") }
+            catch (t: Throwable) { promise.reject("OPTO_VOICE_FAIL", t.message, t) }
+        }.start()
+    }
+
+    @ReactMethod
+    fun startRecording(promise: Promise) {
+        try { promise.resolve(voice.startRecording()) }
+        catch (t: Throwable) { promise.reject("OPTO_VOICE_FAIL", t.message, t) }
+    }
+
+    @ReactMethod
+    fun stopRecording(promise: Promise) {
+        try {
+            val path = voice.stopRecording()
+            if (path != null) {
+                voice.transcribeFile(path) { transcript ->
+                    val ctx = reactApplicationContext
+                    emit(ctx, OptoConfig.EVENT_TRANSCRIPT, Arguments.createMap().apply {
+                        putString("transcript", transcript)
+                        putString("file", path)
+                    })
+                }
+                promise.resolve(path)
+            } else { promise.resolve(null) }
+        } catch (t: Throwable) { promise.reject("OPTO_VOICE_FAIL", t.message, t) }
+    }
+
+    @ReactMethod
+    fun speak(text: String, promise: Promise) {
+        val ctx = reactApplicationContext
+        voice.speak(text) {
+            emit(ctx, OptoConfig.EVENT_TTS_DONE, Arguments.createMap())
+            promise.resolve(true)
+        }
+    }
+
+    @ReactMethod
+    fun stopSpeaking(promise: Promise) {
+        voice.stopSpeaking()
+        promise.resolve(true)
     }
 
     @ReactMethod
