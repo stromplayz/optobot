@@ -4,17 +4,24 @@ import android.content.Context
 import android.util.Log
 
 /**
- * OptoInferenceEngine — orchestrates load + chat.
+ * OptoInferenceEngine — orchestrates model load + streaming chat.
  *
- * STUB MODE: When ONNX Runtime isn't available, chat() returns a
- * canned mock response after a short delay. The UI works identically
- * — only the AI responses are placeholder text.
- *
- * FULL MODE: Runs the on-device LFM2.5-230M with mmap + streaming.
+ * Flow:
+ *   1. load() → decrypt model → open ONNX session
+ *   2. chat(prompt) → tokenize → step-by-step generation → stream tokens
+ *   3. Each step: feed full sequence, get logits, argmax next token, emit
+ *   4. Stop at EOS, max tokens, or stop string
  */
 class OptoInferenceEngine(private val context: Context) {
 
     private val loader = OptoModelLoader(context)
+    private val tokenizer = OptoTokenizer(context)
+    private val streamer = OptoStreamer()
+
+    @Volatile private var isGenerating = false
+    @Volatile private var stopRequested = false
+
+    val isReady: Boolean get() = loader.isReady && tokenizer.isLoaded
 
     interface Listener {
         fun onLoadProgress(p: Float)
@@ -23,53 +30,105 @@ class OptoInferenceEngine(private val context: Context) {
         fun onError(message: String)
     }
 
-    val isReady: Boolean get() = loader.isReady
-
     fun load(listener: Listener) {
-        listener.onLoadProgress(0.0f)
-        val ok = loader.ensureLoaded { listener.onLoadProgress(it) }
-        if (!ok) {
-            listener.onLoadProgress(1.0f)
+        try {
+            listener.onLoadProgress(0.0f)
+            tokenizer.load()
+            listener.onLoadProgress(0.10f)
+            loader.ensureLoaded { listener.onLoadProgress(it) }
+        } catch (t: Throwable) {
+            Log.e(TAG, "load failed", t)
+            listener.onError(t.message ?: "Load failed")
         }
     }
+
+    fun stop() { stopRequested = true }
 
     fun chat(prompt: String, systemPrompt: String?, listener: Listener) {
-        if (!loader.isReady) {
-            // Stub mode: generate a canned response
-            Thread {
-                try {
-                    Thread.sleep(300)
-                    listener.onToken("(", prompt)
-                    val response = generateStubResponse(prompt)
-                    var acc = ""
-                    for (word in response.split(" ")) {
-                        acc += if (acc.isEmpty()) word else " $word"
-                        listener.onToken(word, acc)
-                        Thread.sleep(40)
-                    }
-                    listener.onComplete(acc)
-                } catch (t: Throwable) {
-                    listener.onError(t.message ?: "stub generation failed")
-                }
-            }.start()
+        if (isGenerating) {
+            listener.onError("Already generating")
             return
         }
-        // Full mode would run ONNX inference here
-        listener.onError("Full inference mode not yet implemented in this build")
+        if (!loader.isReady) {
+            listener.onError("Model not loaded")
+            return
+        }
+        isGenerating = true
+        stopRequested = false
+
+        Thread {
+            try {
+                val session = loader.session()
+                val eosId = tokenizer.eosId
+
+                // Build the full chat prompt
+                val basePrompt = tokenizer.buildChatPrompt(prompt)
+                val fullPrompt = if (systemPrompt != null) {
+                    // Prepend system prompt if provided
+                    val sysIds = tokenizer.encode(systemPrompt, addBos = true)
+                    sysIds + basePrompt
+                } else {
+                    basePrompt
+                }
+
+                // Current sequence (prompt + generated tokens)
+                val currentIds = ArrayList<Long>(fullPrompt.toList())
+                val generated = StringBuilder()
+                var produced = 0
+
+                while (!stopRequested && produced < OptoConfig.MAX_NEW_TOKENS) {
+                    val idsArray = currentIds.toLongArray()
+
+                    // Run one forward pass
+                    val step = streamer.step(session, idsArray)
+
+                    // Check EOS
+                    if (eosId >= 0 && step.nextId == eosId.toLong()) {
+                        break
+                    }
+
+                    // Decode the new token
+                    val piece = tokenizer.decode(longArrayOf(step.nextId))
+                    if (piece.isNotEmpty()) {
+                        generated.append(piece)
+                        listener.onToken(piece, generated.toString())
+
+                        // Stop-string check
+                        if (OptoConfig.STOP_STRINGS.any { generated.contains(it) }) {
+                            val cleaned = OptoConfig.STOP_STRINGS.fold(generated.toString()) { acc, s -> acc.replace(s, "") }
+                            listener.onComplete(cleaned.trim())
+                            break
+                        }
+                    }
+
+                    currentIds.add(step.nextId)
+                    produced++
+
+                    // Check if we hit max context
+                    if (currentIds.size > OptoConfig.MAX_CONTEXT_TOKENS) {
+                        // Truncate from the front (drop oldest)
+                        val dropCount = currentIds.size - OptoConfig.MAX_CONTEXT_TOKENS + 50
+                        repeat(dropCount) { currentIds.removeAt(0) }
+                    }
+                }
+
+                if (!stopRequested) {
+                    listener.onComplete(generated.toString().trim())
+                } else {
+                    listener.onComplete(generated.toString().trim())
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "chat failed", t)
+                listener.onError(t.message ?: "Generation failed")
+            } finally {
+                isGenerating = false
+                stopRequested = false
+            }
+        }.start()
     }
 
-    fun stop() { /* no-op in stub */ }
-    fun release() { loader.release() }
-
-    private fun generateStubResponse(prompt: String): String {
-        val p = prompt.lowercase()
-        return when {
-            "glaucoma" in p -> "Glaucoma is a group of eye conditions that damage the optic nerve, often caused by high intraocular pressure. Early detection via tonometry and dilated exams is key. I'd recommend annual screening for patients over 40."
-            "diabet" in p -> "Diabetic retinopathy is a complication of diabetes affecting retinal blood vessels. Annual dilated eye exams are recommended for all diabetic patients. Tight glycemic control slows progression."
-            "soap" in p || "note" in p -> "I can help draft a SOAP note. Tell me the patient's complaint, exam findings, assessment, and plan — I'll structure it. Should I save it?"
-            "search" in p || "latest" in p -> "I'm running in stub mode. On a real device, I'd suggest running /search to fetch current info from the web."
-            else -> "I heard: \"$prompt\". In stub mode I can't do real inference. The full build with ONNX Runtime would give a grounded response using the on-device LFM2.5-230M model."
-        }
+    fun release() {
+        loader.release()
     }
 
     companion object {

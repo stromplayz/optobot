@@ -1,228 +1,236 @@
 package com.optobot.native
 
+import android.content.Context
+import android.content.Intent
+import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
 import android.util.Log
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.io.File
+import java.util.Locale
 
 /**
- * OptoVoice — on-device speech-to-text + text-to-speech + wake word.
+ * OptoVoice — on-device STT + TTS using Android's built-in engines.
  *
- * Architecture:
- *   ┌────────────────────────────────────────────────────────┐
- *   │  Mic (AudioRecord, 16kHz mono PCM)                     │
- *   │     │                                                  │
- *   │     ▼                                                  │
- *   │  VAD (energy-based, 30ms frames)                       │
- *   │     │                                                  │
- *   │     ├── silence → idle                                 │
- *   │     └── speech  → buffer into 2-3s chunks              │
- *   │                                                          │
- *   │  Chunk ──► Whisper.cpp (base.en, ~75MB)                │
- *   │     │                                                  │
- *   │     ▼                                                  │
- *   │  Transcript                                            │
- *   │     │                                                  │
- *   │     ├── contains "hey opto" → activate full mode        │
- *   │     └── otherwise → discard (wake-word filter)        │
- *   │                                                          │
- *   │  In full mode:                                          │
- *   │     - 1.5s silence → end of speech                    │
- *   │     - Final transcript ──► LFM2.5-230M                │
- *   │     - LLM response ──► Kokoro TTS ──► AudioTrack       │
- *   └────────────────────────────────────────────────────────┘
+ * STT: android.speech.SpeechRecognizer
+ *   - Free, no API key
+ *   - On modern Android (12+), uses on-device recognition
+ *   - Older versions may use Google's cloud recognizer (still free)
  *
- * Native dependencies (built locally with NDK):
- *   - libwhisper.so         — from whisper.cpp's android build
- *   - libopto_voice_jni.so  — our JNI bridge to whisper + kokoro
+ * TTS: android.speech.tts.TextToSpeech
+ *   - Free, no API key
+ *   - Uses the device's installed TTS engine (Google TTS, Samsung TTS, etc.)
+ *   - Works offline on most modern devices
  *
- * The Kokoro TTS uses ONNX Runtime (already in our dependencies)
- * so no extra native lib needed for TTS.
+ * No native libs, no NDK build, no whisper.cpp, no Kokoro — just the
+ * Android platform APIs. This means the APK works on every Android
+ * device without any extra dependencies.
  *
- * Models (all bundled + AES-256-GCM encrypted in assets):
- *   - opto_whisper.bin  ~75 MB (Whisper base.en Q4)
- *   - opto_kokoro.bin  ~87 MB (Kokoro-82M ONNX Q4)
- *   - opto_voices.bin  ~3 MB  (Kokoro voice pack — single speaker)
- *
- * Privacy:
- *   - Audio never leaves the device.
- *   - No cloud STT / TTS APIs are used.
- *   - Whisper + Kokoro both run via native code on-device.
- *
- * Performance on mid-range Android (Snapdragon 7-gen, 4GB RAM):
- *   - Whisper base.en real-time factor: ~0.3x (3s of audio → 1s to transcribe)
- *   - Kokoro TTS real-time factor: ~0.5x (1s of text → 0.5s to synthesize)
- *   - End-to-end voice latency: ~1.5s from end-of-speech to start of reply
+ * Wake word: not built-in to Android. We approximate it by running
+ * SpeechRecognizer in a loop and checking if the transcript contains
+ * "hey opto". This is battery-intensive, so we only do it when the
+ * app is in the foreground.
  */
-class OptoVoice(private val context: android.content.Context) {
+class OptoVoice(private val context: Context) {
 
+    private var tts: TextToSpeech? = null
+    private var recognizer: SpeechRecognizer? = null
+    private var ttsReady = false
     private var isListening = false
     private var isRecording = false
-    private var isSpeaking = false
-    private var wakeWordActive = false
 
-    /** Whether native whisper + kokoro libs are loaded. False in stub mode. */
-    private val nativeAvailable: Boolean by lazy {
-        try {
-            System.loadLibrary("whisper")
-            System.loadLibrary("opto_voice_jni")
-            true
-        } catch (_: Throwable) {
-            Log.w(TAG, "native voice libs not available — running in stub mode")
-            false
+    @Volatile private var wakeWordCallback: (() -> Unit)? = null
+    @Volatile private var wakeWordActive = false
+
+    val isReady: Boolean get() = ttsReady
+
+    /** Initialize TTS. Call once on app start. */
+    fun init(onReady: () -> Unit) {
+        tts = TextToSpeech(context) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                tts?.language = Locale.US
+                ttsReady = true
+                Log.i(TAG, "TTS ready")
+            } else {
+                Log.e(TAG, "TTS init failed: $status")
+            }
+            onReady()
         }
     }
 
-    val isReady: Boolean get() = nativeAvailable
-
-    // ──────────────────────────────────────────────────────────────
-    // Public API (called via OptoBotModule RN bridge)
-    // ──────────────────────────────────────────────────────────────
+    // ─── One-shot listen (STT) ───
 
     /**
-     * Start the always-on wake-word listener.
-     * Audio is captured from the mic, VAD-segmented, and short chunks are
-     * passed to Whisper. When "hey opto" is detected, onWakeWord fires.
+     * Start listening for a single utterance. Returns the transcript
+     * via the callback. Uses Android's SpeechRecognizer.
      */
-    fun startWakeWordListener(onWakeWord: () -> Unit) {
-        if (!nativeAvailable) {
-            Log.w(TAG, "wake word listener not available in stub mode")
+    fun listenOnce(onResult: (String) -> Unit, onError: (String) -> Unit) {
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            onError("Speech recognition not available on this device")
             return
         }
-        if (isListening) return
+
+        if (recognizer == null) {
+            recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+        }
+
+        val listener = object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onError(error: Int) {
+                val msg = when (error) {
+                    SpeechRecognizer.ERROR_NO_MATCH -> "no speech detected"
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "speech timeout"
+                    SpeechRecognizer.ERROR_AUDIO -> "audio error"
+                    else -> "recognition error: $error"
+                }
+                isListening = false
+                onError(msg)
+            }
+            override fun onResults(results: Bundle?) {
+                isListening = false
+                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                val text = matches?.firstOrNull() ?: ""
+                Log.i(TAG, "STT result: $text")
+                onResult(text)
+            }
+            override fun onPartialResults(partialResults: Bundle?) {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        }
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+        }
+
         isListening = true
+        recognizer?.setRecognitionListener(listener)
+        recognizer?.startListening(intent)
+    }
+
+    fun stopListening() {
+        isListening = false
+        recognizer?.stopListening()
+    }
+
+    // ─── TTS ───
+
+    /** Speak text via Android's built-in TTS engine. */
+    fun speak(text: String, onDone: () -> Unit) {
+        if (!ttsReady) {
+            Log.w(TAG, "TTS not ready, skipping speak")
+            onDone()
+            return
+        }
+        tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+            override fun onDone(utteranceId: String?) { onDone() }
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) { onDone() }
+        })
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "opto_${System.currentTimeMillis()}")
+    }
+
+    fun stopSpeaking() {
+        tts?.stop()
+    }
+
+    // ─── Wake word (simplified) ───
+
+    /**
+     * Start a wake-word loop. Periodically listens for "hey opto".
+     * This is a simplified version — real wake word detection would
+     * need a dedicated model (like openWakeWord or Porcupine).
+     */
+    fun startWakeWordListener(onWakeWord: () -> Unit) {
+        wakeWordCallback = onWakeWord
         wakeWordActive = true
         Thread {
-            try {
-                nativeStartWakeWord(onWakeWord)
-            } catch (t: Throwable) {
-                Log.e(TAG, "wake word listener crashed", t)
-            } finally {
-                isListening = false
-                wakeWordActive = false
+            while (wakeWordActive) {
+                try {
+                    Thread.sleep(2000)
+                    if (!wakeWordActive) break
+                    // Quick listen burst
+                    if (!isListening && !isRecording) {
+                        val triggered = arrayOf(false)
+                        listenOnce(
+                            onResult = { text ->
+                                if (text.lowercase().contains("hey opto") || text.lowercase().contains("hey opta") || text.lowercase().contains("hey obo")) {
+                                    triggered[0] = true
+                                    onWakeWord()
+                                }
+                            },
+                            onError = { /* ignore, retry next cycle */ }
+                        )
+                        Thread.sleep(5000)  // wait for listen to complete
+                    }
+                } catch (_: Throwable) {
+                    Thread.sleep(3000)
+                }
             }
         }.start()
     }
 
     fun stopWakeWordListener() {
         wakeWordActive = false
-        isListening = false
-        if (nativeAvailable) nativeStopWakeWord()
+        wakeWordCallback = null
     }
 
-    /**
-     * One-shot listen: start recording, capture until 1.5s of silence,
-     * transcribe via Whisper, return the text.
-     *
-     * Use this after the wake word fires, OR when the user taps the mic.
-     */
-    fun listenOnce(): String? {
-        if (!nativeAvailable) {
-            // Stub mode: return a canned string for UI testing
-            Thread.sleep(1500)
-            return "(stub) hello optobot"
-        }
-        return nativeListenOnce()
-    }
+    // ─── Record mode (for patient consults) ───
 
     /**
-     * Record mode: start a long recording (e.g., a 10-min patient consult).
-     * Audio is buffered to a tmpfile. After stopRecording() is called,
-     * the file is transcribed in the background via Whisper.
-     *
-     * While recording, the user can still talk to the AI for other things
-     * — recording and chat don't block each other.
+     * Start recording. Uses SpeechRecognizer in continuous mode —
+     * collects transcript chunks until stopRecording is called.
      */
+    private val recordBuffer = StringBuilder()
+
     fun startRecording(): Boolean {
-        if (!nativeAvailable) {
-            isRecording = true
-            return true  // stub mode
-        }
-        if (isRecording) return false
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) return false
         isRecording = true
-        return nativeStartRecording(File(context.cacheDir, "opto_record_${System.currentTimeMillis()}.wav").absolutePath)
+        recordBuffer.clear()
+        // Start a loop of listen bursts
+        Thread {
+            while (isRecording) {
+                val gotResult = java.util.concurrent.CountDownLatch(1)
+                listenOnce(
+                    onResult = { text ->
+                        recordBuffer.append(text).append(" ")
+                        gotResult.countDown()
+                    },
+                    onError = { gotResult.countDown() }
+                )
+                try { gotResult.await(10, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) {}
+            }
+        }.start()
+        return true
     }
 
-    /** Stop recording. Returns the tmpfile path; transcription kicks off in the background. */
-    fun stopRecording(): String? {
-        if (!isRecording) return null
+    fun stopRecording(): String {
         isRecording = false
-        if (!nativeAvailable) return null
-        return nativeStopRecording()
+        stopListening()
+        return recordBuffer.toString()
     }
 
-    /**
-     * Transcribe a recorded file in the background. Calls back when done
-     * with the full transcript. Used by the record mode for patient consults.
-     */
-    fun transcribeFile(path: String, onResult: (String) -> Unit) {
-        Thread {
-            try {
-                val text = if (nativeAvailable) nativeTranscribeFile(path) else "(stub) recorded transcript"
-                onResult(text)
-            } catch (t: Throwable) {
-                Log.e(TAG, "transcribe failed", t)
-                onResult("")
-            }
-        }.start()
+    // ─── Cleanup ───
+
+    fun release() {
+        stopWakeWordListener()
+        stopListening()
+        stopSpeaking()
+        try { recognizer?.destroy() } catch (_: Throwable) {}
+        try { tts?.stop() } catch (_: Throwable) {}
+        try { tts?.shutdown() } catch (_: Throwable) {}
+        recognizer = null
+        tts = null
     }
-
-    /**
-     * Speak the given text via Kokoro TTS. Plays through the phone speaker.
-     * Calls onDone when playback finishes.
-     */
-    fun speak(text: String, onDone: () -> Unit) {
-        if (!nativeAvailable) {
-            // Stub: simulate TTS with a delay
-            Thread {
-                Thread.sleep(text.length * 30L)  // ~30ms per char
-                onDone()
-            }.start()
-            return
-        }
-        isSpeaking = true
-        Thread {
-            try {
-                nativeSpeak(text)
-            } finally {
-                isSpeaking = false
-                onDone()
-            }
-        }.start()
-    }
-
-    fun stopSpeaking() {
-        if (nativeAvailable) nativeStopSpeaking()
-        isSpeaking = false
-    }
-
-    // ──────────────────────────────────────────────────────────────
-    // JNI — implemented in /optobot/android/app/src/main/cpp/opto_voice_jni.c
-    // Build with NDK 27+ via CMakeLists.txt in that folder.
-    // ──────────────────────────────────────────────────────────────
-
-    private external fun nativeStartWakeWord(onWakeWord: () -> Unit): Boolean
-    private external fun nativeStopWakeWord()
-    private external fun nativeListenOnce(): String
-    private external fun nativeStartRecording(path: String): Boolean
-    private external fun nativeStopRecording(): String?
-    private external fun nativeTranscribeFile(path: String): String
-    private external fun nativeSpeak(text: String): Boolean
-    private external fun nativeStopSpeaking()
 
     companion object {
         private const val TAG = "OptoVoice"
-
-        // VAD parameters — tuned for typical consult-room acoustics
-        const val VAD_FRAME_MS = 30
-        const val VAD_ENERGY_THRESHOLD = 300.0
-        const val VAD_SILENCE_FRAMES_FOR_EOS = 50  // ~1.5s of silence ends a turn
-        const val VAD_MIN_SPEECH_FRAMES = 10       // ~300ms minimum to count as speech
-
-        // Whisper chunk size for wake word (shorter = lower latency, higher CPU)
-        const val WAKE_WORD_CHUNK_MS = 2000
-
-        // Sample rate — Whisper expects 16kHz mono
-        const val SAMPLE_RATE = 16000
     }
 }

@@ -99,10 +99,8 @@ dependencies {
     // Coroutines
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
 
-    // ONNX Runtime Android — for the LLM inference
-    // NOTE: Disabled in stub-mode build. Re-enable when building with NDK
-    // for real on-device inference.
-    // implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.19.0'
+    // ONNX Runtime Android — for real on-device LLM inference
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.19.0'
 
     // JSON parsing (for OptoReach API responses)
     implementation 'org.json:json:20240303'
