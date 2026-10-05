@@ -156,6 +156,47 @@ jobs:
           rm -f android/app/src/main/assets/opto_key.hint
           echo "cleaned sensitive intermediates"
 
+      - name: Create GitHub Release and upload APK
+        if: github.ref == 'refs/heads/main' && success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK_FILE=$(ls OptoBot-*-release.apk | head -1)
+          if [ -z "$APK_FILE" ]; then
+            echo "No APK found, skipping release"
+            exit 0
+          fi
+          TAG="v0.4.${GITHUB_RUN_NUMBER}"
+          echo "Creating release $TAG for $APK_FILE"
+          curl -s -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/releases \
+            -d "{\"tag_name\":\"$TAG\",\"target_commitish\":\"main\",\"name\":\"OptoBot $TAG\",\"body\":\"Full working APK with on-device LFM2.5-230M + Whisper STT + Kokoro TTS. All models pre-bundled and encrypted.\",\"draft\":false,\"prerelease\":false}" \
+            > /tmp/release.json
+          RELEASE_ID=$(python3 -c "import json; print(json.load(open('/tmp/release.json')).get('id',''))")
+          if [ -z "$RELEASE_ID" ]; then
+            echo "Failed to create release"
+            cat /tmp/release.json
+            exit 0
+          fi
+          echo "Release ID: $RELEASE_ID"
+          curl -s -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/vnd.android.package-archive" \
+            --data-binary @"$APK_FILE" \
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=OptoBot-$TAG-release.apk" \
+            > /tmp/asset.json
+          ASSET_URL=$(python3 -c "import json; print(json.load(open('/tmp/asset.json')).get('browser_download_url',''))")
+          echo "APK uploaded to: $ASSET_URL"
+          curl -s -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: text/plain" \
+            --data-binary @OptoBot-checksums.txt \
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=OptoBot-checksums.txt" \
+            > /dev/null
+          echo "Done"
+
   notify:
     name: Summary
     needs: build-apk
@@ -170,9 +211,10 @@ jobs:
           echo "- Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "- Branch: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**APK download:** [Actions → latest run → Artifacts](https://github.com/stromplayz/optobot/actions)" >> $GITHUB_STEP_SUMMARY
+          echo "**APK download:** [Releases page](https://github.com/stromplayz/optobot/releases)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Look for \`OptoBot-APK-*\` artifact, download the zip, unzip, then:" >> $GITHUB_STEP_SUMMARY
+          echo "The APK is automatically published to the Releases page on every successful build." >> $GITHUB_STEP_SUMMARY
+          echo "Install with:" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
           echo "adb install OptoBot-*-release.apk" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
