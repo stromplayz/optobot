@@ -20,6 +20,37 @@ object OptoConfig {
     /** PBKDF2 key-derivation params (also bundled, NOT secret on their own) */
     const val ASSET_KEY_HINT = "opto_key.hint"
 
+    // ─── Voice model assets (all AES-256-GCM encrypted) ───
+
+    /** Whisper base.en encoder (ONNX Q4) — encrypted */
+    const val ASSET_WHISPER_ENCODER = "opto_voice_whisper_encoder_q4.bin"
+
+    /** Whisper base.en decoder (ONNX Q4, merged with past) — encrypted */
+    const val ASSET_WHISPER_DECODER = "opto_voice_whisper_decoder_q4.bin"
+
+    /** Whisper tokenizer (JSON, encrypted) */
+    const val ASSET_WHISPER_TOKENIZER = "opto_voice_whisper_tokenizer.bin"
+
+    /** Kokoro-82M TTS model (ONNX Q4) — encrypted */
+    const val ASSET_KOKORO_MODEL = "opto_voice_kokoro_q4.bin"
+
+    /** Kokoro voice pack (single voice, ~512KB) — encrypted */
+    const val ASSET_KOKORO_VOICE = "opto_voice_kokoro_voice_af.bin"
+
+    /** Kokoro config + tokenizer (JSON, encrypted) */
+    const val ASSET_KOKORO_CONFIG = "opto_voice_kokoro_config.bin"
+
+    // ─── Voice constants ───
+
+    /** Whisper audio sample rate */
+    const val WHISPER_SAMPLE_RATE = 16000
+
+    /** Whisper max audio length in seconds (30s chunks per Whisper design) */
+    const val WHISPER_CHUNK_SECONDS = 30
+
+    /** Kokoro TTS sample rate */
+    const val KOKORO_SAMPLE_RATE = 24000
+
     /** Salt length for PBKDF2 (bytes) */
     const val PBKDF2_SALT_LEN = 32
 

@@ -1,177 +1,130 @@
 package com.optobot.native
 
 import android.content.Context
-import android.content.Intent
-import android.os.Bundle
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.util.Log
-import java.util.Locale
+import kotlin.math.sqrt
 
 /**
- * OptoVoice — on-device STT + TTS using Android's built-in engines.
+ * OptoVoice — on-device STT + TTS using Whisper + Kokoro.
  *
- * STT: android.speech.SpeechRecognizer
- *   - Free, no API key
- *   - On modern Android (12+), uses on-device recognition
- *   - Older versions may use Google's cloud recognizer (still free)
+ * STT: OptoWhisper (Whisper base.en ONNX Q4)
+ * TTS: OptoKokoro (Kokoro-82M ONNX Q4)
  *
- * TTS: android.speech.tts.TextToSpeech
- *   - Free, no API key
- *   - Uses the device's installed TTS engine (Google TTS, Samsung TTS, etc.)
- *   - Works offline on most modern devices
+ * Both run on ONNX Runtime — no native libs, no NDK build, no API keys.
+ * All models are pre-bundled + encrypted in the APK.
  *
- * No native libs, no NDK build, no whisper.cpp, no Kokoro — just the
- * Android platform APIs. This means the APK works on every Android
- * device without any extra dependencies.
+ * Wake word: implemented as a lightweight VAD loop that records 2-second
+ * chunks and passes them to Whisper. When "hey opto" is detected in the
+ * transcript, the callback fires.
  *
- * Wake word: not built-in to Android. We approximate it by running
- * SpeechRecognizer in a loop and checking if the transcript contains
- * "hey opto". This is battery-intensive, so we only do it when the
- * app is in the foreground.
+ * Record mode: continuous recording to a buffer, transcribed via Whisper
+ * when stopped.
  */
 class OptoVoice(private val context: Context) {
 
-    private var tts: TextToSpeech? = null
-    private var recognizer: SpeechRecognizer? = null
-    private var ttsReady = false
-    private var isListening = false
-    private var isRecording = false
+    private val whisper = OptoWhisper(context)
+    private val kokoro = OptoKokoro(context)
 
-    @Volatile private var wakeWordCallback: (() -> Unit)? = null
     @Volatile private var wakeWordActive = false
+    @Volatile private var isListening = false
+    @Volatile private var isRecording = false
+    private val recordBuffer = StringBuilder()
 
-    val isReady: Boolean get() = ttsReady
+    val isReady: Boolean get() = whisper.isReady && kokoro.isReady
 
-    /** Initialize TTS. Call once on app start. */
+    /** Load both Whisper and Kokoro models. Call once on app start. */
     fun init(onReady: () -> Unit) {
-        tts = TextToSpeech(context) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                tts?.language = Locale.US
-                ttsReady = true
-                Log.i(TAG, "TTS ready")
-            } else {
-                Log.e(TAG, "TTS init failed: $status")
+        Thread {
+            try {
+                whisper.load()
+                kokoro.load()
+                Log.i(TAG, "Voice ready: whisper=${whisper.isReady} kokoro=${kokoro.isReady}")
+            } catch (t: Throwable) {
+                Log.e(TAG, "Voice init failed", t)
+            } finally {
+                onReady()
             }
-            onReady()
-        }
+        }.start()
     }
 
-    // ─── One-shot listen (STT) ───
+    // ─── One-shot listen (STT via Whisper) ───
 
     /**
-     * Start listening for a single utterance. Returns the transcript
-     * via the callback. Uses Android's SpeechRecognizer.
+     * Start listening for a single utterance. Records audio with VAD,
+     * transcribes via Whisper, returns text.
      */
     fun listenOnce(onResult: (String) -> Unit, onError: (String) -> Unit) {
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            onError("Speech recognition not available on this device")
+        if (!whisper.isReady) {
+            onError("Whisper not loaded")
             return
         }
-
-        if (recognizer == null) {
-            recognizer = SpeechRecognizer.createSpeechRecognizer(context)
-        }
-
-        val listener = object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {}
-            override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(rmsdB: Float) {}
-            override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {}
-            override fun onError(error: Int) {
-                val msg = when (error) {
-                    SpeechRecognizer.ERROR_NO_MATCH -> "no speech detected"
-                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "speech timeout"
-                    SpeechRecognizer.ERROR_AUDIO -> "audio error"
-                    else -> "recognition error: $error"
-                }
+        isListening = true
+        whisper.listenOnce(
+            onResult = { text ->
+                isListening = false
+                onResult(text)
+            },
+            onError = { msg ->
                 isListening = false
                 onError(msg)
             }
-            override fun onResults(results: Bundle?) {
-                isListening = false
-                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                val text = matches?.firstOrNull() ?: ""
-                Log.i(TAG, "STT result: $text")
-                onResult(text)
-            }
-            override fun onPartialResults(partialResults: Bundle?) {}
-            override fun onEvent(eventType: Int, params: Bundle?) {}
-        }
-
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-        }
-
-        isListening = true
-        recognizer?.setRecognitionListener(listener)
-        recognizer?.startListening(intent)
+        )
     }
 
     fun stopListening() {
         isListening = false
-        recognizer?.stopListening()
     }
 
-    // ─── TTS ───
+    // ─── TTS via Kokoro ───
 
-    /** Speak text via Android's built-in TTS engine. */
     fun speak(text: String, onDone: () -> Unit) {
-        if (!ttsReady) {
-            Log.w(TAG, "TTS not ready, skipping speak")
+        if (!kokoro.isReady) {
+            Log.w(TAG, "Kokoro not ready, skipping speak")
             onDone()
             return
         }
-        tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {}
-            override fun onDone(utteranceId: String?) { onDone() }
-            @Deprecated("Deprecated in Java")
-            override fun onError(utteranceId: String?) { onDone() }
-        })
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "opto_${System.currentTimeMillis()}")
+        kokoro.speak(text, onDone)
     }
 
     fun stopSpeaking() {
-        tts?.stop()
+        kokoro.stopSpeaking()
     }
 
-    // ─── Wake word (simplified) ───
+    // ─── Wake word (Whisper-based) ───
 
-    /**
-     * Start a wake-word loop. Periodically listens for "hey opto".
-     * This is a simplified version — real wake word detection would
-     * need a dedicated model (like openWakeWord or Porcupine).
-     */
     fun startWakeWordListener(onWakeWord: () -> Unit) {
-        wakeWordCallback = onWakeWord
+        if (!whisper.isReady) {
+            Log.w(TAG, "Whisper not ready, wake word disabled")
+            return
+        }
         wakeWordActive = true
         Thread {
             while (wakeWordActive) {
                 try {
-                    Thread.sleep(2000)
-                    if (!wakeWordActive) break
-                    // Quick listen burst
-                    if (!isListening && !isRecording) {
-                        val triggered = arrayOf(false)
-                        listenOnce(
-                            onResult = { text ->
-                                if (text.lowercase().contains("hey opto") || text.lowercase().contains("hey opta") || text.lowercase().contains("hey obo")) {
-                                    triggered[0] = true
-                                    onWakeWord()
-                                }
-                            },
-                            onError = { /* ignore, retry next cycle */ }
-                        )
-                        Thread.sleep(5000)  // wait for listen to complete
+                    Thread.sleep(1000)
+                    if (!wakeWordActive || isListening || isRecording) continue
+                    // Record a 2-second burst and transcribe
+                    val latch = java.util.concurrent.CountDownLatch(1)
+                    var heard = ""
+                    whisper.listenOnce(
+                        onResult = { text ->
+                            heard = text
+                            latch.countDown()
+                        },
+                        onError = { latch.countDown() }
+                    )
+                    latch.await(15, java.util.concurrent.TimeUnit.SECONDS)
+                    if (wakeWordActive) {
+                        val h = heard.lowercase()
+                        if (h.contains("hey opto") || h.contains("hey opta") || h.contains("hey obo") || h.contains("hi opto")) {
+                            onWakeWord()
+                        }
                     }
                 } catch (_: Throwable) {
-                    Thread.sleep(3000)
+                    Thread.sleep(2000)
                 }
             }
         }.start()
@@ -179,33 +132,28 @@ class OptoVoice(private val context: Context) {
 
     fun stopWakeWordListener() {
         wakeWordActive = false
-        wakeWordCallback = null
     }
 
     // ─── Record mode (for patient consults) ───
 
-    /**
-     * Start recording. Uses SpeechRecognizer in continuous mode —
-     * collects transcript chunks until stopRecording is called.
-     */
-    private val recordBuffer = StringBuilder()
-
     fun startRecording(): Boolean {
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) return false
+        if (!whisper.isReady) return false
         isRecording = true
         recordBuffer.clear()
-        // Start a loop of listen bursts
+        // Record in 30s chunks, transcribe each chunk, append to buffer
         Thread {
             while (isRecording) {
-                val gotResult = java.util.concurrent.CountDownLatch(1)
-                listenOnce(
+                val latch = java.util.concurrent.CountDownLatch(1)
+                whisper.listenOnce(
                     onResult = { text ->
-                        recordBuffer.append(text).append(" ")
-                        gotResult.countDown()
+                        if (text.isNotBlank()) {
+                            recordBuffer.append(text).append(" ")
+                        }
+                        latch.countDown()
                     },
-                    onError = { gotResult.countDown() }
+                    onError = { latch.countDown() }
                 )
-                try { gotResult.await(10, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) {}
+                try { latch.await(40, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) {}
             }
         }.start()
         return true
@@ -213,8 +161,7 @@ class OptoVoice(private val context: Context) {
 
     fun stopRecording(): String {
         isRecording = false
-        stopListening()
-        return recordBuffer.toString()
+        return recordBuffer.toString().trim()
     }
 
     // ─── Cleanup ───
@@ -223,11 +170,8 @@ class OptoVoice(private val context: Context) {
         stopWakeWordListener()
         stopListening()
         stopSpeaking()
-        try { recognizer?.destroy() } catch (_: Throwable) {}
-        try { tts?.stop() } catch (_: Throwable) {}
-        try { tts?.shutdown() } catch (_: Throwable) {}
-        recognizer = null
-        tts = null
+        whisper.release()
+        kokoro.release()
     }
 
     companion object {

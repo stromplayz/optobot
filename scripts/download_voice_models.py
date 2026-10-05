@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
 """
-download_voice_models.py — fetch Whisper + Kokoro models for on-device
-speech-to-text + text-to-speech.
+download_voice_models.py — fetch ONNX Whisper + Kokoro models for
+on-device speech-to-text + text-to-speech via ONNX Runtime.
 
-Both are bundled alongside the LFM2.5-230M model so the APK ships with
-voice support out of the box.
+Models (all from onnx-community on HuggingFace, all ONNX format):
+  - Whisper base.en Q4:
+    - encoder_model_q4.onnx  (~18MB)
+    - decoder_model_merged_q4.onnx  (~118MB)
+  - Kokoro-82M Q4:
+    - model_q4.onnx  (~291MB)
+    - voices/af.bin  (~512KB, single voice pack)
 
-Models:
-  - Whisper base.en Q5_1 (~75MB) from ggerganov/whisper.cpp
-  - Kokoro-82M voice pack (~3MB single voice) from hexgrad/Kokoro-82M
+Total: ~427MB of voice models bundled alongside the LFM2.5-230M LLM.
 
-Note: The full Kokoro model is PyTorch (.pth), not ONNX. For ONNX TTS,
-users can either:
-  - Convert Kokoro to ONNX locally (see docs/voice.md for instructions)
-  - Or skip Kokoro and use Android's built-in TextToSpeech engine
+These run on the same ONNX Runtime we already use for the LLM — no
+extra native libs needed.
 
-We treat both as OPTIONAL here — the build succeeds even if voice models
-aren't downloaded. The Kotlin OptoVoice module falls back to stub mode
-when the native libs aren't available, and the UI shows "voice disabled".
-
-Uses HF_TOKEN env var if set. Free, open access, no API keys needed.
+Uses HF_TOKEN env var if set. Free, open access, no API keys.
 """
 
 import argparse
@@ -30,20 +27,24 @@ import urllib.error
 
 _HF_BASE = "https://huggingface.co/"
 
-# Whisper — ggerganov/whisper.cpp repo on HuggingFace
-_WHISPER_REPO = "ggerganov/whisper.cpp"
-_WHISPER_FILE = "ggml-base.en-q5_1.bin"   # base.en Q5_1, ~75MB, English-only
-
-# Kokoro — single voice pack from hexgrad/Kokoro-82M
-_KOKORO_REPO = "hexgrad/Kokoro-82M"
-_KOKORO_FILES = [
-    "voices/af_heart.pt",   # ~3MB single-voice pack (PyTorch format)
+# Whisper base.en Q4 — ONNX format from onnx-community
+_WHISPER_REPO = "onnx-community/whisper-base.en"
+_WHISPER_FILES = [
+    ("onnx/encoder_model_q4.onnx", "whisper_encoder_q4.onnx", True),
+    ("onnx/decoder_model_merged_q4.onnx", "whisper_decoder_q4.onnx", True),
+    ("tokenizer.json", "whisper_tokenizer.json", True),
+    ("generation_config.json", "whisper_generation_config.json", False),
 ]
 
-# All voice files are OPTIONAL — build succeeds even if download fails.
-# The Kotlin side falls back to stub mode (text-only chat, no voice).
-ESSENTIAL = set()
-OPTIONAL = {_WHISPER_FILE, _KOKORO_FILES[0]}
+# Kokoro-82M Q4 — ONNX format from onnx-community
+_KOKORO_REPO = "onnx-community/Kokoro-82M-ONNX"
+_KOKORO_FILES = [
+    ("onnx/model_q4.onnx", "kokoro_q4.onnx", True),
+    ("voices/af.bin", "kokoro_voice_af.bin", True),
+    ("config.json", "kokoro_config.json", True),
+    ("tokenizer.json", "kokoro_tokenizer.json", True),
+    ("tokenizer_config.json", "kokoro_tokenizer_config.json", False),
+]
 
 
 def _auth_header() -> dict:
@@ -81,14 +82,13 @@ def download(url: str, dest: str, essential: bool) -> bool:
         if essential:
             print(f"    FATAL: {short} is essential. Aborting.")
             sys.exit(2)
-        print(f"    (optional file skipped — voice features will be limited)")
+        print(f"    (optional file skipped — voice features limited)")
         return False
     except Exception as e:
         print(f"  ! error for {short}: {e}")
         if essential:
             print(f"    FATAL: {short} is essential. Aborting.")
             sys.exit(2)
-        print(f"    (optional file skipped — voice features will be limited)")
         return False
 
 
@@ -97,25 +97,32 @@ def main():
     ap.add_argument("--out", required=True, help="Output directory")
     args = ap.parse_args()
 
-    print("[optobot] downloading voice models (Whisper base.en + Kokoro voice, ~78MB total)")
-    files = [
-        (_WHISPER_REPO, _WHISPER_FILE, _WHISPER_FILE, False),       # optional
-        (_KOKORO_REPO, _KOKORO_FILES[0], "kokoro-voice-af_heart.pt", False),  # optional
-    ]
+    print("[optobot] downloading voice models (Whisper base.en Q4 + Kokoro-82M Q4, ~427MB total)")
     failures = 0
-    for repo, src_path, dest_name, essential in files:
-        url = f"{_HF_BASE}{repo}/resolve/main/{src_path}"
+
+    print("[optobot] Whisper base.en ONNX Q4 (~136MB):")
+    for src_path, dest_name, essential in _WHISPER_FILES:
+        url = f"{_HF_BASE}{_WHISPER_REPO}/resolve/main/{src_path}"
         dest = os.path.join(args.out, dest_name)
         if os.path.exists(dest) and os.path.getsize(dest) > 0:
             print(f"  OK  {dest_name} exists, skipping")
             continue
-        if not download(url, dest, essential=essential):
+        if not download(url, dest, essential):
+            failures += 1
+
+    print("[optobot] Kokoro-82M ONNX Q4 (~291MB):")
+    for src_path, dest_name, essential in _KOKORO_FILES:
+        url = f"{_HF_BASE}{_KOKORO_REPO}/resolve/main/{src_path}"
+        dest = os.path.join(args.out, dest_name)
+        if os.path.exists(dest) and os.path.getsize(dest) > 0:
+            print(f"  OK  {dest_name} exists, skipping")
+            continue
+        if not download(url, dest, essential):
             failures += 1
 
     print(f"[optobot] done. failures={failures}")
     if failures:
-        print(f"[optobot] WARN: {failures} optional voice files could not be downloaded.")
-        print(f"[optobot] Voice features will be limited to stub mode in this build.")
+        print(f"[optobot] WARN: {failures} files failed. Voice features may be limited.")
 
 
 if __name__ == "__main__":
