@@ -268,7 +268,10 @@ class OptoWhisper(private val context: Context) {
         val melMin = 2595f * kotlin.math.ln(1 + fMin / 700f) / kotlin.math.ln(10f)
         val melMax = 2595f * kotlin.math.ln(1 + fMax / 700f) / kotlin.math.ln(10f)
         val melPoints = FloatArray(nMel + 2) { i -> melMin + (melMax - melMin) * i / (nMel + 1) }
-        val hzPoints = FloatArray(nMel + 2) { i -> 700f * (kotlin.math.pow(10f, melPoints[i] * kotlin.math.ln(10f) / 2595f) - 1f) }
+        val hzPoints = FloatArray(nMel + 2) { i ->
+            val mel = melPoints[i] * kotlin.math.ln(10f) / 2595f
+            700f * (Math.pow(10.0, mel.toDouble()).toFloat() - 1f)
+        }
         val binPoints = FloatArray(nMel + 2) { i -> hzPoints[i] * (nFft - 1) * 2 / sampleRate }
 
         val filters = FloatArray(nMel * nFft)
