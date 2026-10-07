@@ -127,27 +127,11 @@ jobs:
         run: |
           sha256sum OptoBot-*.apk | tee OptoBot-checksums.txt
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: OptoBot-APK-${{ github.sha }}
-          path: |
-            OptoBot-*.apk
-            OptoBot-checksums.txt
-          retention-days: 30
-          if-no-files-found: error
-
-      - name: Upload encrypted bundle (for local builds)
-        uses: actions/upload-artifact@v4
-        with:
-          name: OptoBot-encrypted-bundle-${{ github.sha }}
-          path: |
-            android/app/src/main/assets/opto_core.bin
-            android/app/src/main/assets/opto_meta.bin
-            android/app/src/main/assets/opto_key.hint
-            android/app/src/main/assets/opto_voice_*.bin
-          retention-days: 30
-          if-no-files-found: warn
+      # NOTE: No actions/upload-artifact here — artifact storage counts against the
+      # account's 500 MB Actions storage quota and 6 prior builds consumed ~5.6 GB.
+      # The APK is delivered via the GitHub Release step below (release assets do
+      # NOT count toward Actions storage). Keep artifacts for debugging only, and
+      # if ever re-added, use retention-days: 1.
 
       - name: Cleanup sensitive files
         if: always()
