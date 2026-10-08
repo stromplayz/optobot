@@ -103,7 +103,7 @@ dependencies {
     implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.19.0'
 
     // JSON parsing (for OptoReach API responses)
-    implementation 'org.json:json:20240303'
+    implementation 'org.json:json:20260814'
 
     // Test
     testImplementation 'junit:junit:4.13.2'
