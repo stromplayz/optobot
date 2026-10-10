@@ -85,11 +85,8 @@ class OptoTokenizer(private val context: Context) {
                         r.beginArray()
                         var rank = 0
                         while (r.hasNext()) {
-                            if (r.peek() != JsonReader.Token.STRING) {
-                                r.skipValue()
-                                continue
-                            }
-                            val m = r.nextString()
+                            // Use try/catch to skip non-string elements safely
+                            val m = try { r.nextString() } catch (_: Throwable) { r.skipValue(); continue }
                             val idx = m.indexOf(' ')
                             if (idx > 0 && idx < m.length - 1) {
                                 mergesRank[m.substring(0, idx) to m.substring(idx + 1)] = rank++
