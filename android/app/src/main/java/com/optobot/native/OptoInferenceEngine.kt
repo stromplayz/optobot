@@ -33,12 +33,20 @@ class OptoInferenceEngine(private val context: Context) {
     fun load(listener: Listener) {
         try {
             listener.onLoadProgress(0.0f)
-            tokenizer.load()
-            listener.onLoadProgress(0.10f)
+            // Load tokenizer first — it's small and never fails
+            try {
+                tokenizer.load()
+                listener.onLoadProgress(0.10f)
+            } catch (t: Throwable) {
+                Log.w(TAG, "Tokenizer load failed (non-fatal)", t)
+                listener.onLoadProgress(0.15f)
+            }
+            // Load the ONNX model — this is the big one (202MB)
             loader.ensureLoaded { listener.onLoadProgress(it) }
         } catch (t: Throwable) {
             Log.e(TAG, "load failed", t)
-            listener.onError(t.message ?: "Load failed")
+            // Don't throw — just report error so UI can show it
+            listener.onError(t.message ?: "Model load failed")
         }
     }
 

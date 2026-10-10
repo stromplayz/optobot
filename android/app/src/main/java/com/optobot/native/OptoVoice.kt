@@ -35,18 +35,32 @@ class OptoVoice(private val context: Context) {
 
     val isReady: Boolean get() = whisper.isReady && kokoro.isReady
 
-    /** Load both Whisper and Kokoro models. Call once on app start. */
+    /** Load both Whisper and Kokoro models in background. Non-blocking. */
     fun init(onReady: () -> Unit) {
         Thread {
             try {
+                // Load Whisper first (smaller, needed for STT)
                 whisper.load()
-                kokoro.load()
-                Log.i(TAG, "Voice ready: whisper=${whisper.isReady} kokoro=${kokoro.isReady}")
+                if (whisper.isReady) {
+                    Log.i(TAG, "Whisper loaded OK")
+                } else {
+                    Log.w(TAG, "Whisper not ready — voice input disabled")
+                }
             } catch (t: Throwable) {
-                Log.e(TAG, "Voice init failed", t)
-            } finally {
-                onReady()
+                Log.e(TAG, "Whisper load failed", t)
             }
+            try {
+                // Load Kokoro (for TTS)
+                kokoro.load()
+                if (kokoro.isReady) {
+                    Log.i(TAG, "Kokoro loaded OK")
+                } else {
+                    Log.w(TAG, "Kokoro not ready — voice output disabled")
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "Kokoro load failed", t)
+            }
+            onReady()
         }.start()
     }
 
@@ -55,10 +69,15 @@ class OptoVoice(private val context: Context) {
     /**
      * Start listening for a single utterance. Records audio with VAD,
      * transcribes via Whisper, returns text.
+     *
+     * If Whisper isn't loaded, falls back to a simple "no speech" result
+     * instead of crashing.
      */
     fun listenOnce(onResult: (String) -> Unit, onError: (String) -> Unit) {
         if (!whisper.isReady) {
-            onError("Whisper not loaded")
+            // Don't crash — just report that STT isn't available
+            Log.w(TAG, "listenOnce: Whisper not ready, returning empty")
+            onError("Voice recognition not available")
             return
         }
         isListening = true

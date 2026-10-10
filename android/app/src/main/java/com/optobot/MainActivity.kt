@@ -32,11 +32,12 @@ import com.optobot.native.OptoVoice
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var voice: OptoVoice
-    private lateinit var engine: OptoInferenceEngine
+    private var voice: OptoVoice? = null
+    private var engine: OptoInferenceEngine? = null
     private var hasAudioPermission = false
 
     private val permissionLauncher = registerForActivityResult(
@@ -47,9 +48,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        voice = OptoVoice(applicationContext)
-        engine = OptoInferenceEngine(applicationContext)
 
+        // Check mic permission
         hasAudioPermission = ContextCompat.checkSelfPermission(
             this, Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
@@ -57,8 +57,14 @@ class MainActivity : ComponentActivity() {
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
 
-        voice.init {
-            // TTS ready
+        // Do NOT initialize models here — that would load 652MB of models
+        // on the main thread and crash. We initialize lazily when the user taps.
+        try {
+            voice = OptoVoice(applicationContext)
+            engine = OptoInferenceEngine(applicationContext)
+        } catch (t: Throwable) {
+            // If construction fails, we still show the UI — just nothing works
+            android.util.Log.e("OptoBot", "Model init construction failed", t)
         }
 
         setContent {
@@ -70,6 +76,12 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        try { voice?.release() } catch (_: Throwable) {}
+        try { engine?.release() } catch (_: Throwable) {}
     }
 }
 
@@ -88,67 +100,198 @@ private fun OptoBotTheme(content: @Composable () -> Unit) {
     MaterialTheme(colorScheme = colors, content = content)
 }
 
-enum class VoiceState { IDLE, LISTENING, THINKING, SPEAKING, RECORDING, CONFIRMING }
-
-data class ConfirmRequest(val path: String, val content: String, val message: String)
+enum class VoiceState { IDLE, LOADING, LISTENING, THINKING, SPEAKING, RECORDING, ERROR }
 
 @Composable
 private fun VoiceScreen(
-    voice: OptoVoice,
-    engine: OptoInferenceEngine,
+    voice: OptoVoice?,
+    engine: OptoInferenceEngine?,
     hasAudioPermission: Boolean,
 ) {
     var state by remember { mutableStateOf(VoiceState.IDLE) }
     var userTranscript by remember { mutableStateOf("") }
     var aiText by remember { mutableStateOf("") }
     var statusMessage by remember { mutableStateOf("Tap to start") }
-    var loadProgress by remember { mutableStateOf(0f) }
-    var isLoaded by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var llmLoaded by remember { mutableStateOf(false) }
+    var voiceLoaded by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    // Load the model on first composition
-    LaunchedEffect(Unit) {
-        engine.load(object : OptoInferenceEngine.Listener {
-            override fun onLoadProgress(p: Float) {
-                loadProgress = p
-                statusMessage = "Loading model ${Math.round(p * 100)}%"
-            }
-            override fun onToken(token: String, fullText: String) {
-                aiText = fullText
-            }
-            override fun onComplete(fullText: String) {
-                aiText = fullText
-                // Speak the response
-                state = VoiceState.SPEAKING
-                statusMessage = "Speaking..."
-                voice.speak(fullText) {
-                    state = VoiceState.IDLE
-                    statusMessage = "Tap to talk"
+    // Load ONLY the LLM on first tap, NOT on app start
+    // Voice models load when user actually taps to speak
+
+    // This is the tap handler — everything runs on background threads
+    fun handleTap() {
+        if (state != VoiceState.IDLE) return
+        if (engine == null || voice == null) {
+            errorMessage = "Models not initialized"
+            state = VoiceState.ERROR
+            statusMessage = "Error: models unavailable"
+            return
+        }
+
+        scope.launch(Dispatchers.Main) {
+            try {
+                // Step 1: Load the LLM if not already loaded
+                if (!llmLoaded) {
+                    state = VoiceState.LOADING
+                    statusMessage = "Loading AI model..."
+                    withContext(Dispatchers.IO) {
+                        engine.load(object : OptoInferenceEngine.Listener {
+                            override fun onLoadProgress(p: Float) {
+                                statusMessage = "Loading AI model ${Math.round(p * 100)}%"
+                            }
+                            override fun onToken(token: String, fullText: String) {}
+                            override fun onComplete(fullText: String) {}
+                            override fun onError(message: String) {}
+                        })
+                    }
+                    llmLoaded = engine.isReady
+                    if (!llmLoaded) {
+                        errorMessage = "AI model failed to load"
+                        state = VoiceState.ERROR
+                        statusMessage = "Model load failed. Tap to retry."
+                        return@launch
+                    }
                 }
+
+                // Step 2: Load voice models if not already loaded
+                if (!voiceLoaded) {
+                    state = VoiceState.LOADING
+                    statusMessage = "Loading voice models..."
+                    withContext(Dispatchers.IO) {
+                        voice.init { /* ready */ }
+                        delay(500) // give init a moment
+                    }
+                    voiceLoaded = voice.isReady
+                }
+
+                // Step 3: Start listening
+                state = VoiceState.LISTENING
+                statusMessage = "Listening... (speak now)"
+
+                withContext(Dispatchers.IO) {
+                    voice.listenOnce(
+                        onResult = { text ->
+                            scope.launch(Dispatchers.Main) {
+                                if (text.isBlank()) {
+                                    state = VoiceState.IDLE
+                                    statusMessage = "Didn't catch that. Tap to try again."
+                                    return@launch
+                                }
+                                userTranscript = text
+                                state = VoiceState.THINKING
+                                statusMessage = "Thinking..."
+
+                                // Send to LLM
+                                engine.chat(text, null, object : OptoInferenceEngine.Listener {
+                                    override fun onLoadProgress(p: Float) {}
+                                    override fun onToken(token: String, fullText: String) {
+                                        aiText = fullText
+                                    }
+                                    override fun onComplete(fullText: String) {
+                                        aiText = fullText
+                                        if (fullText.isNotBlank() && voiceLoaded) {
+                                            state = VoiceState.SPEAKING
+                                            statusMessage = "Speaking..."
+                                            voice.speak(fullText) {
+                                                scope.launch(Dispatchers.Main) {
+                                                    state = VoiceState.IDLE
+                                                    statusMessage = "Tap to talk"
+                                                }
+                                            }
+                                        } else {
+                                            state = VoiceState.IDLE
+                                            statusMessage = "Tap to talk"
+                                        }
+                                    }
+                                    override fun onError(message: String) {
+                                        scope.launch(Dispatchers.Main) {
+                                            errorMessage = message
+                                            state = VoiceState.ERROR
+                                            statusMessage = "Error: $message"
+                                        }
+                                    }
+                                })
+                            }
+                        },
+                        onError = { msg ->
+                            scope.launch(Dispatchers.Main) {
+                                state = VoiceState.IDLE
+                                statusMessage = "Mic error. Tap to retry."
+                            }
+                        }
+                    )
+                }
+            } catch (t: Throwable) {
+                android.util.Log.e("OptoBot", "Tap handler crashed", t)
+                errorMessage = t.message ?: "Unknown error"
+                state = VoiceState.ERROR
+                statusMessage = "Error: ${t.message?.take(50)}"
             }
-            override fun onError(message: String) {
-                aiText = "Error: $message"
-                state = VoiceState.IDLE
-                statusMessage = "Tap to talk"
-            }
-        })
-        isLoaded = engine.isReady
-        if (isLoaded) {
-            statusMessage = "Tap or say \"Hey Opto!\""
         }
     }
 
-    // Wake word listener (runs in background)
-    LaunchedEffect(isLoaded) {
-        if (isLoaded) {
-            voice.startWakeWordListener {
-                if (state == VoiceState.IDLE) {
-                    scope.launch(Dispatchers.Main) {
-                        state = VoiceState.LISTENING
-                        statusMessage = "Listening..."
-                        startListening(voice, engine, state, { state = it }, { userTranscript = it }, { aiText = it }, { statusMessage = it }, scope)
+    fun handleLongPress() {
+        scope.launch(Dispatchers.Main) {
+            try {
+                if (state == VoiceState.RECORDING) {
+                    val transcript = voice?.stopRecording() ?: ""
+                    if (transcript.isNotBlank()) {
+                        userTranscript = "Recording: $transcript"
+                        state = VoiceState.THINKING
+                        statusMessage = "Thinking..."
+                        withContext(Dispatchers.IO) {
+                            engine?.chat(transcript, null, object : OptoInferenceEngine.Listener {
+                                override fun onLoadProgress(p: Float) {}
+                                override fun onToken(token: String, fullText: String) {
+                                    aiText = fullText
+                                }
+                                override fun onComplete(fullText: String) {
+                                    aiText = fullText
+                                    scope.launch(Dispatchers.Main) {
+                                        if (fullText.isNotBlank() && voiceLoaded) {
+                                            state = VoiceState.SPEAKING
+                                            statusMessage = "Speaking..."
+                                            voice?.speak(fullText) {
+                                                scope.launch(Dispatchers.Main) {
+                                                    state = VoiceState.IDLE
+                                                    statusMessage = "Tap to talk"
+                                                }
+                                            }
+                                        } else {
+                                            state = VoiceState.IDLE
+                                            statusMessage = "Tap to talk"
+                                        }
+                                    }
+                                }
+                                override fun onError(message: String) {
+                                    scope.launch(Dispatchers.Main) {
+                                        state = VoiceState.ERROR
+                                        statusMessage = "Error: $message"
+                                    }
+                                }
+                            })
+                        }
+                    } else {
+                        state = VoiceState.IDLE
+                        statusMessage = "Tap to talk"
+                    }
+                } else if (state == VoiceState.IDLE || state == VoiceState.LISTENING) {
+                    if (!hasAudioPermission) {
+                        statusMessage = "Microphone permission needed"
+                        return@launch
+                    }
+                    state = VoiceState.RECORDING
+                    statusMessage = "Recording..."
+                    withContext(Dispatchers.IO) {
+                        voice?.startRecording()
                     }
                 }
+            } catch (t: Throwable) {
+                android.util.Log.e("OptoBot", "Long press handler crashed", t)
+                state = VoiceState.ERROR
+                statusMessage = "Error: ${t.message?.take(50)}"
             }
         }
     }
@@ -159,52 +302,8 @@ private fun VoiceScreen(
             .background(Color(0xFFFAF7F2))
             .pointerInput(state) {
                 detectTapGestures(
-                    onTap = {
-                        if (state == VoiceState.IDLE && isLoaded) {
-                            state = VoiceState.LISTENING
-                            statusMessage = "Listening..."
-                            startListening(voice, engine, state, { state = it }, { userTranscript = it }, { aiText = it }, { statusMessage = it }, scope)
-                        } else if (state == VoiceState.SPEAKING) {
-                            voice.stopSpeaking()
-                            state = VoiceState.IDLE
-                            statusMessage = "Tap to talk"
-                        }
-                    },
-                    onLongPress = {
-                        if (state == VoiceState.RECORDING) {
-                            val transcript = voice.stopRecording()
-                            if (transcript.isNotBlank()) {
-                                userTranscript = "Recording: $transcript"
-                                state = VoiceState.THINKING
-                                statusMessage = "Thinking..."
-                                engine.chat(transcript, null, object : OptoInferenceEngine.Listener {
-                                    override fun onLoadProgress(p: Float) {}
-                                    override fun onToken(token: String, fullText: String) { aiText = fullText }
-                                    override fun onComplete(fullText: String) {
-                                        aiText = fullText
-                                        state = VoiceState.SPEAKING
-                                        statusMessage = "Speaking..."
-                                        voice.speak(fullText) {
-                                            state = VoiceState.IDLE
-                                            statusMessage = "Tap to talk"
-                                        }
-                                    }
-                                    override fun onError(message: String) {
-                                        aiText = "Error: $message"
-                                        state = VoiceState.IDLE
-                                        statusMessage = "Tap to talk"
-                                    }
-                                })
-                            } else {
-                                state = VoiceState.IDLE
-                                statusMessage = "Tap to talk"
-                            }
-                        } else if (state == VoiceState.IDLE || state == VoiceState.LISTENING) {
-                            voice.startRecording()
-                            state = VoiceState.RECORDING
-                            statusMessage = "Recording..."
-                        }
-                    },
+                    onTap = { handleTap() },
+                    onLongPress = { handleLongPress() },
                 )
             },
         contentAlignment = Alignment.Center,
@@ -219,22 +318,32 @@ private fun VoiceScreen(
             AIEye(state = state, modifier = Modifier.size(240.dp))
             Spacer(modifier = Modifier.height(24.dp))
 
-            Text(statusMessage, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF1F1A14), textAlign = TextAlign.Center)
+            Text(
+                statusMessage,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color(0xFF1F1A14),
+                textAlign = TextAlign.Center,
+            )
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
                 text = when (state) {
-                    VoiceState.IDLE -> "Tap to talk • Long-press to record"
+                    VoiceState.IDLE -> if (llmLoaded) "Tap to talk • Long-press to record" else "Tap to load models"
+                    VoiceState.LOADING -> "Loading on-device models..."
                     VoiceState.LISTENING -> "Speak now"
                     VoiceState.THINKING -> "On-device LFM2.5-230M generating"
                     VoiceState.SPEAKING -> "Tap to interrupt"
                     VoiceState.RECORDING -> "Long-press to stop"
-                    VoiceState.CONFIRMING -> "Tap Yes or No"
+                    VoiceState.ERROR -> "Tap to retry"
                 },
-                fontSize = 13.sp, color = Color(0xFF6B5D4C), textAlign = TextAlign.Center,
+                fontSize = 13.sp,
+                color = Color(0xFF6B5D4C),
+                textAlign = TextAlign.Center,
             )
             Spacer(modifier = Modifier.height(24.dp))
 
+            // Transcript
             if (userTranscript.isNotBlank()) {
                 Surface(color = Color(0xFFF2EDE5), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
@@ -249,6 +358,7 @@ private fun VoiceScreen(
                 }
             }
 
+            // AI response (after completion)
             if (aiText.isNotBlank() && state == VoiceState.IDLE) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Surface(color = Color(0xFFFFFFFF), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
@@ -258,54 +368,19 @@ private fun VoiceScreen(
                     }
                 }
             }
+
+            // Error display
+            if (state == VoiceState.ERROR && errorMessage != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(color = Color(0xFFFFE0E0), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Error: ", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFC24A2F))
+                        Text(errorMessage ?: "", fontSize = 14.sp, color = Color(0xFF1F1A14))
+                    }
+                }
+            }
         }
     }
-}
-
-private fun startListening(
-    voice: OptoVoice,
-    engine: OptoInferenceEngine,
-    currentState: VoiceState,
-    setState: (VoiceState) -> Unit,
-    setUserText: (String) -> Unit,
-    setAiText: (String) -> Unit,
-    setStatus: (String) -> Unit,
-    scope: kotlinx.coroutines.CoroutineScope,
-) {
-    voice.listenOnce(
-        onResult = { text ->
-            if (text.isNotBlank()) {
-                setUserText(text)
-                setState(VoiceState.THINKING)
-                setStatus("Thinking...")
-                engine.chat(text, null, object : OptoInferenceEngine.Listener {
-                    override fun onLoadProgress(p: Float) {}
-                    override fun onToken(token: String, fullText: String) { setAiText(fullText) }
-                    override fun onComplete(fullText: String) {
-                        setAiText(fullText)
-                        setState(VoiceState.SPEAKING)
-                        setStatus("Speaking...")
-                        voice.speak(fullText) {
-                            setState(VoiceState.IDLE)
-                            setStatus("Tap to talk")
-                        }
-                    }
-                    override fun onError(message: String) {
-                        setAiText("Error: $message")
-                        setState(VoiceState.IDLE)
-                        setStatus("Tap to talk")
-                    }
-                })
-            } else {
-                setState(VoiceState.IDLE)
-                setStatus("Tap to talk")
-            }
-        },
-        onError = { msg ->
-            setState(VoiceState.IDLE)
-            setStatus("Tap to talk")
-        }
-    )
 }
 
 // ─── AI Eye ───
@@ -314,17 +389,17 @@ private fun startListening(
 private fun AIEye(state: VoiceState, modifier: Modifier = Modifier) {
     val accent = Color(0xFFE85D2F)
     val danger = Color(0xFFC24A2F)
-    val warning = Color(0xFFC57A1E)
     val eyeColor = when (state) {
         VoiceState.RECORDING -> danger
-        VoiceState.CONFIRMING -> warning
+        VoiceState.ERROR -> Color(0xFFC24A2F)
+        VoiceState.LOADING -> Color(0xFFC57A1E)
         else -> accent
     }
 
     val infiniteTransition = rememberInfiniteTransition(label = "eye")
     val blink by infiniteTransition.animateFloat(
         initialValue = 1f,
-        targetValue = if (state == VoiceState.IDLE) 0.05f else if (state == VoiceState.THINKING) 0.18f else 0.85f,
+        targetValue = if (state == VoiceState.IDLE) 0.05f else if (state == VoiceState.THINKING || state == VoiceState.LOADING) 0.18f else 0.85f,
         animationSpec = infiniteRepeatable(tween(if (state == VoiceState.IDLE) 2500 else 800, easing = EaseInOutCubic), RepeatMode.Reverse),
         label = "blink",
     )
@@ -335,31 +410,17 @@ private fun AIEye(state: VoiceState, modifier: Modifier = Modifier) {
             VoiceState.RECORDING -> 0.85f
             VoiceState.SPEAKING -> 0.75f
             VoiceState.THINKING -> 0.55f
-            VoiceState.CONFIRMING -> 0.65f
+            VoiceState.LOADING -> 0.5f
+            VoiceState.ERROR -> 0.3f
             VoiceState.IDLE -> 0.25f
         },
         animationSpec = infiniteRepeatable(tween(500, easing = EaseInOutCubic), RepeatMode.Reverse),
         label = "glow",
     )
-    val waveScale by infiniteTransition.animateFloat(
-        initialValue = 0.4f, targetValue = 1.8f,
-        animationSpec = infiniteRepeatable(tween(1500, easing = LinearEasing)),
-        label = "wave",
-    )
     val spin by infiniteTransition.animateFloat(
         initialValue = 0f, targetValue = 360f,
         animationSpec = infiniteRepeatable(tween(2000, easing = LinearEasing)),
         label = "spin",
-    )
-    val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 1f, targetValue = 1.6f,
-        animationSpec = infiniteRepeatable(tween(1200, easing = LinearEasing)),
-        label = "pulse",
-    )
-    val pulseAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.9f, targetValue = 0f,
-        animationSpec = infiniteRepeatable(tween(1200, easing = LinearEasing)),
-        label = "pulseAlpha",
     )
 
     Canvas(modifier = modifier) {
@@ -368,27 +429,15 @@ private fun AIEye(state: VoiceState, modifier: Modifier = Modifier) {
 
         drawCircle(color = eyeColor.copy(alpha = glow * 0.3f), radius = eyeRadius * 1.4f, center = this.center)
 
-        if (state == VoiceState.LISTENING) {
-            for (i in 0..2) {
-                drawCircle(
-                    color = eyeColor.copy(alpha = (1f - (waveScale - 0.4f) / 1.4f).coerceIn(0f, 0.6f) * (1f - i * 0.2f)),
-                    radius = eyeRadius * (waveScale + i * 0.3f),
-                    center = this.center,
-                    style = Stroke(width = 3f),
-                )
-            }
-        }
-
-        if (state == VoiceState.RECORDING) {
-            drawCircle(color = danger.copy(alpha = pulseAlpha), radius = eyeRadius * pulseScale * 1.3f, center = this.center, style = Stroke(width = 3f))
-        }
-
-        if (state == VoiceState.THINKING) {
+        if (state == VoiceState.THINKING || state == VoiceState.LOADING) {
             for (i in 0..5) {
                 val angle = (spin + i * 60) * (Math.PI.toFloat() / 180f)
                 drawCircle(
                     color = accent, radius = 5f,
-                    center = Offset(this.center.x + eyeRadius * 1.2f * kotlin.math.cos(angle), this.center.y + eyeRadius * 1.2f * kotlin.math.sin(angle)),
+                    center = Offset(
+                        this.center.x + eyeRadius * 1.2f * kotlin.math.cos(angle),
+                        this.center.y + eyeRadius * 1.2f * kotlin.math.sin(angle),
+                    ),
                 )
             }
         }
@@ -399,9 +448,5 @@ private fun AIEye(state: VoiceState, modifier: Modifier = Modifier) {
         val irisScale = blink.coerceIn(0.05f, 1f)
         drawCircle(color = eyeColor, radius = eyeRadius * 0.55f * irisScale, center = this.center)
         drawCircle(color = Color(0xFF1F1A14), radius = eyeRadius * 0.28f * irisScale, center = this.center)
-
-        if (state == VoiceState.CONFIRMING) {
-            drawCircle(color = warning.copy(alpha = 0.4f), radius = eyeRadius, center = this.center)
-        }
     }
 }

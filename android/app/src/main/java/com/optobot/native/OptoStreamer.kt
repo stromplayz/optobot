@@ -86,33 +86,39 @@ class OptoStreamer {
 
     /**
      * Extract the logits for the last position from the model output.
-     * The output can be [1, seq, vocab] (float array) or [1, vocab] (last step only).
+     * Handles multiple possible ONNX tensor return types:
+     *   - Array<Array<FloatArray>>  → [1, seq, vocab] → take [0][last]
+     *   - Array<FloatArray>          → [seq, vocab] → take last
+     *   - FloatArray                 → [vocab] → return directly
      */
-    @Suppress("UNCHECKED_CAST")
     private fun extractLastLogits(value: Any): FloatArray {
-        return when (value) {
-            is Array<*> -> {
-                if (value.size > 0 && value[0] is Array<*>) {
-                    // [1, seq, vocab] or [batch, seq, vocab]
-                    val batch = value[0] as Array<*>
-                    if (batch.isNotEmpty() && batch[0] is FloatArray) {
-                        // [seq, vocab] → take last
-                        batch[batch.size - 1] as FloatArray
-                    } else if (batch.isNotEmpty() && batch[0] is Array<*>) {
-                        // [seq, vocab] nested → take last
-                        val lastSeq = batch[batch.size - 1] as Array<*>
-                        FloatArray(lastSeq.size) { (lastSeq[it] as Number).toFloat() }
-                    } else {
-                        // [1, vocab] → first element
-                        value[0] as FloatArray
+        return try {
+            when (value) {
+                is FloatArray -> value
+                is Array<*> -> {
+                    if (value.isEmpty()) return FloatArray(0)
+                    val first = value[0]
+                    when (first) {
+                        is Array<*> -> {
+                            if (first.isEmpty()) FloatArray(0)
+                            else {
+                                val lastSeq = first[first.size - 1]
+                                when (lastSeq) {
+                                    is FloatArray -> lastSeq
+                                    is Array<*> -> FloatArray(lastSeq.size) { (lastSeq[it] as Number).toFloat() }
+                                    else -> FloatArray(0)
+                                }
+                            }
+                        }
+                        is FloatArray -> first
+                        else -> FloatArray(0)
                     }
-                } else {
-                    // [vocab] directly
-                    value[0] as FloatArray
                 }
+                else -> FloatArray(0)
             }
-            is FloatArray -> value
-            else -> throw RuntimeException("unexpected logits type: ${value::class.java}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed to extract logits", t)
+            FloatArray(0)
         }
     }
 
